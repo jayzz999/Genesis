@@ -134,6 +134,67 @@ async def _tool_http_request(method: str, url: str, headers: dict | None = None,
         return {"ok": False, "error": str(e)}
 
 
+# ── Phase 5B & 5C Tools ────────────────────────────────────────────────
+
+async def _tool_decompose_goal(sub_goals: list[dict], org_id: str = "") -> dict:
+    org = store.load_organism(org_id)
+    if not org:
+        return {"ok": False, "error": "Organism not found"}
+    from .types import SubGoal
+    spawned = []
+    for sg_dict in sub_goals:
+        goal = sg_dict.get("goal")
+        if not goal: continue
+        sg = SubGoal(goal=goal, priority=sg_dict.get("priority", 0))
+        # Spawn child
+        child = seed(
+            intent_goal=sg.goal,
+            name=f"Child of {org.name}",
+            constraints=org.intent.constraints,
+            forbidden=org.intent.forbidden
+        )
+        child.parent_organism_id = org.id
+        # Inherit active capabilities
+        child.reasoning_strategies = list(org.reasoning_strategies)
+        child.mcp_servers = list(org.mcp_servers)
+        store.save_organism(child)
+        sg.child_organism_id = child.id
+        org.sub_goals.append(sg)
+        spawned.append({"id": sg.id, "child_id": sg.child_organism_id, "goal": sg.goal})
+    store.save_organism(org)
+    return {"ok": True, "spawned_count": len(spawned), "sub_goals": spawned}
+
+async def _tool_check_children(org_id: str = "") -> dict:
+    org = store.load_organism(org_id)
+    if not org: return {"ok": False}
+    from .types import OrganismState
+    results = []
+    for sg in org.sub_goals:
+        if sg.child_organism_id:
+            child = store.load_organism(sg.child_organism_id)
+            if child:
+                if child.state in (OrganismState.DEAD, OrganismState.DYING):
+                    sg.status = "completed"
+                    reals = [d for d in store.all_decisions(child.id) if not d.is_dream]
+                    if reals and reals[-1].action.get("name") == "declare_done":
+                        sg.result = reals[-1].action.get("args")
+                else:
+                    sg.status = "active"
+                results.append({"id": sg.id, "goal": sg.goal, "status": sg.status, "result": sg.result})
+    store.save_organism(org)
+    return {"ok": True, "children": results}
+
+async def _tool_broadcast(content: dict, org_id: str = "") -> dict:
+    from . import society
+    await society.broadcast(org_id, content)
+    return {"ok": True, "broadcasted": True}
+
+async def _tool_send_message(recipient_id: str, content: dict, org_id: str = "") -> dict:
+    from . import society
+    ok = await society.send(org_id, recipient_id, content)
+    return {"ok": ok, "recipient_found": ok}
+
+
 # Map of tool name → (callable, description for LLM prompt)
 TOOLS: dict[str, tuple[Callable[..., Awaitable[dict]], str]] = {
     "send_slack": (_tool_send_slack, "Post a message to a Slack channel or User. Args: channel (str, can be channel ID like #general or User ID for DM), text (str)."),
@@ -141,6 +202,10 @@ TOOLS: dict[str, tuple[Callable[..., Awaitable[dict]], str]] = {
                      "Make an HTTP request. Args: method (str), url (str), headers (dict, optional), body (dict, optional)."),
     "fetch_web_page": (_tool_fetch_web_page, "Fetch and read the text content of a web page. Args: url (str)."),
     "forge_mcp_server": (_tool_forge_mcp_server, "Autonomously write and deploy a new MCP Python server to give yourself new capabilities. Args: name (str, no spaces), description (str, detailed explanation of what APIs it connects to and what tools it should expose)."),
+    "decompose_goal": (_tool_decompose_goal, "Phase 5B: Break your intent into sub-goals and spawn child organisms to solve them. Args: sub_goals (list of {goal: str, priority: int})."),
+    "check_children": (_tool_check_children, "Phase 5B: Check the status and results of your spawned child organisms. Args: {}."),
+    "broadcast": (_tool_broadcast, "Phase 5C: Send a message to all other living organisms. Args: content (dict)."),
+    "send_message": (_tool_send_message, "Phase 5C: Send a direct message to a specific organism. Args: recipient_id (str), content (dict)."),
     "remember": (None, "Record a learned pattern. Args: pattern (str). Use sparingly — only durable insights."),
     "declare_done": (None, "Signal the intent has been satisfied for this trigger. Args: summary (str)."),
 }
@@ -283,7 +348,7 @@ async def _execute_tool(name: str, args: dict, org: Organism) -> dict:
         return {"ok": False, "error": f"tool {name} has no implementation"}
         
     # Inject organism ID into meta-tools that need it
-    if name == "forge_mcp_server":
+    if name in ("forge_mcp_server", "decompose_goal", "check_children", "broadcast", "send_message"):
         args["org_id"] = org.id
         
     try:
@@ -309,6 +374,17 @@ async def _reason_with_llm(ctx) -> str:
     if ctx.skills_text:
         prompt = ctx.skills_text + "\n\n" + prompt
 
+    # Phase 5A: inject active reasoning strategy modifier
+    if ctx.organism and not ctx.is_dream:
+        from . import metacognition as _mc
+        strategy_mod = _mc.get_strategy_prompt_modifier(ctx.organism)
+        if strategy_mod:
+            strategy_system = SYSTEM_PROMPT + strategy_mod
+        else:
+            strategy_system = SYSTEM_PROMPT
+    else:
+        strategy_system = SYSTEM_PROMPT
+
     if not ctx.is_dream and ctx.event_callback:
         await ctx.event_callback("organism.perceiving", {
             "organism_id": ctx.organism_id,
@@ -322,7 +398,7 @@ async def _reason_with_llm(ctx) -> str:
 
     raw = await generate_text(
         prompt=prompt,
-        system=SYSTEM_PROMPT,
+        system=strategy_system,
         model=org.reasoning_model,
         temperature=0.4 if ctx.is_dream else 0.1,
         max_tokens=2000,
@@ -403,6 +479,7 @@ async def _execute_action(ctx) -> Decision:
             alternatives_considered=alternatives,
             is_dream=ctx.is_dream,
             shadow_branch=ctx.shadow_branch,
+            strategy_used=org.active_strategy_id if not ctx.is_dream else None,
         )
         return decision
 
@@ -427,6 +504,7 @@ async def _execute_action(ctx) -> Decision:
         alternatives_considered=alternatives,
         is_dream=ctx.is_dream,
         shadow_branch=ctx.shadow_branch,
+        strategy_used=org.active_strategy_id if not ctx.is_dream else None,
     )
     return decision
 
@@ -440,6 +518,9 @@ async def _persist_and_emit(ctx) -> None:
 
     # Update lifecycle state
     if not ctx.is_dream:
+        # Reload org to avoid overwriting changes made by tools (like decompose_goal)
+        org = store.load_organism(org.id) or org
+        
         action_name = decision.action.get("name", "noop")
         if action_name == "declare_done":
             org.state = OrganismState.PERCEIVING

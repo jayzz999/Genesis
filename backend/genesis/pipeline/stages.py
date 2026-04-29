@@ -43,6 +43,21 @@ async def gather_context(ctx: PipelineContext) -> None:
     ctx.organism = store.load_organism(ctx.organism_id)
     if not ctx.organism:
         raise ValueError(f"organism {ctx.organism_id} not found")
+
+    # Phase 5A: seed default strategies if this organism has none
+    if not ctx.organism.reasoning_strategies and not ctx.is_dream:
+        from .. import metacognition
+        metacognition.seed_default_strategies(ctx.organism)
+        store.save_organism(ctx.organism)
+
+    # Phase 5A: select best strategy for this perception type
+    if not ctx.is_dream and ctx.organism.meta_cognition_enabled:
+        from .. import metacognition
+        best = metacognition.select_strategy_for_perception(ctx.organism, ctx.perception)
+        if best and best.id != ctx.organism.active_strategy_id:
+            ctx.organism.active_strategy_id = best.id
+            store.save_organism(ctx.organism)
+
     all_decisions = store.all_decisions(ctx.organism_id)
     ctx.real_history = [d for d in all_decisions if not d.is_dream and not d.shadow_branch][-8:]
     ctx.dream_history = [d for d in all_decisions if d.is_dream][-5:]
@@ -78,6 +93,23 @@ async def record(ctx: PipelineContext) -> None:
     await runtime._persist_and_emit(ctx)
 
 
+async def meta_critique(ctx: PipelineContext) -> None:
+    """Phase 5A: Run the meta-cognitive critic after a real decision."""
+    if ctx.is_dream or ctx.shadow_branch:
+        return
+    if not ctx.decision:
+        return
+    try:
+        from .. import metacognition
+        await metacognition.critique(
+            ctx.organism_id,
+            ctx.decision,
+            event_callback=ctx.event_callback,
+        )
+    except Exception as e:
+        logger.warning(f"[pipeline] meta_critique failed (non-fatal): {e}")
+
+
 async def run(
     organism_id: str,
     perception: dict,
@@ -100,5 +132,6 @@ async def run(
     await reason(ctx)
     await act(ctx)
     await record(ctx)
+    await meta_critique(ctx)  # Phase 5A: self-evaluate reasoning quality
     assert ctx.decision is not None
     return ctx.decision

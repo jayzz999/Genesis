@@ -54,6 +54,34 @@ class MCPServerSpec(BaseModel):
     transport: str = "stdio"  # "stdio" | "sse"
 
 
+# ── Reasoning Strategy (cognitive DNA) ─────────────────────────────────
+
+class ReasoningStrategy(BaseModel):
+    """A named approach to reasoning. Organisms learn which works best.
+
+    Over time the meta-cognitive critic updates success_rate per strategy
+    and maps perception types to strategies. This is how organisms learn
+    to THINK DIFFERENTLY — not just act differently.
+    """
+    id: str = Field(default_factory=lambda: f"rs_{uuid4().hex[:8]}")
+    name: str = Field(..., description="e.g. 'first_principles', 'analogical', 'cautious'")
+    description: str = ""
+    system_prompt_modifier: str = Field(
+        "",
+        description="Injected into the LLM system prompt when this strategy is active."
+    )
+    success_rate: float = Field(0.5, description="Rolling success rate, updated by critic.")
+    usage_count: int = 0
+    best_for: list[str] = Field(
+        default_factory=list,
+        description="Perception types this strategy excels at."
+    )
+    worst_for: list[str] = Field(
+        default_factory=list,
+        description="Perception types this strategy fails at."
+    )
+
+
 # ── Skill reference (DNA pointer) ──────────────────────────────────────
 
 class SkillRef(BaseModel):
@@ -111,6 +139,35 @@ class Decision(BaseModel):
         None,
         description="If part of a counterfactual timeline, the branch name."
     )
+    strategy_used: Optional[str] = Field(
+        None,
+        description="ID of the ReasoningStrategy active when this decision was made."
+    )
+
+
+# ── SubGoal (Phase 5B — Goal Decomposition) ────────────────────────────
+
+class SubGoal(BaseModel):
+    """A decomposed piece of the parent intent."""
+    id: str = Field(default_factory=lambda: f"sg_{uuid4().hex[:8]}")
+    goal: str = Field(..., description="The specific sub-objective")
+    priority: int = 0
+    status: str = "pending"  # pending | active | completed | failed
+    child_organism_id: Optional[str] = None
+    result: Optional[dict] = None
+
+
+# ── OrganismMessage (Phase 5C — Society) ───────────────────────────────
+
+class OrganismMessage(BaseModel):
+    """A message sent between organisms."""
+    id: str = Field(default_factory=lambda: f"msg_{uuid4().hex[:8]}")
+    sender_id: str
+    recipient_id: Optional[str] = None  # None = broadcast
+    message_type: str = "inform"  # inform | request | delegate | result
+    content: dict
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    read: bool = False
 
 
 # ── Organism ───────────────────────────────────────────────────────────
@@ -145,6 +202,26 @@ class Organism(BaseModel):
     fitness_score: float = 0.0
     distilled_skill_id: Optional[str] = None
 
+    # Phase 5A — Meta-Cognition: reasoning strategy library
+    reasoning_strategies: list[ReasoningStrategy] = Field(default_factory=list)
+    active_strategy_id: Optional[str] = Field(
+        None,
+        description="Currently active reasoning strategy. Updated by meta-critic."
+    )
+    meta_cognition_enabled: bool = Field(
+        True,
+        description="Whether the meta-cognitive critic runs after each decision."
+    )
+
+    # Phase 5B — Goal Decomposition
+    sub_goals: list[SubGoal] = Field(default_factory=list)
+    parent_organism_id: Optional[str] = None
+
+    # Phase 5E — Curiosity
+    knowledge_gaps: list[str] = Field(default_factory=list)
+    hypotheses: list[dict] = Field(default_factory=list)
+    surprise_log: list[dict] = Field(default_factory=list)
+
     # Configurable runtime knobs
     dream_budget_per_cycle: int = 1  # dreams per idle cycle (set GENESIS_DREAMING=0 to disable entirely)
     reasoning_model: str = "gemini-2.5-flash"  # ignored when GENESIS_LLM_PROVIDER=groq
@@ -168,3 +245,47 @@ class CounterfactualBranch(BaseModel):
     summary: str = ""  # LLM-written summary of how this timeline differs
 
     promoted: bool = False  # True if user promoted this to canonical reality
+
+
+# ── Meta-Decision (the organism thinking about its thinking) ───────────
+
+class MetaDecision(BaseModel):
+    """A reflection on a Decision. The organism evaluating its own reasoning.
+
+    This is the atom of meta-cognition. After each real Decision, the critic
+    asks: 'Was my reasoning sound? What should I do differently next time?'
+    MetaDecisions are linked to Decisions and accumulate into a meta-cognitive
+    history that drives reasoning strategy selection.
+    """
+    id: str = Field(default_factory=lambda: f"md_{uuid4().hex[:12]}")
+    decision_id: str = Field(..., description="The Decision being evaluated.")
+    organism_id: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+    # Critic evaluation
+    reasoning_quality: float = Field(
+        0.5, description="0.0–1.0 how logically sound the reasoning was."
+    )
+    attention_gaps: list[str] = Field(
+        default_factory=list,
+        description="Context the organism should have noticed but didn't."
+    )
+    action_efficiency: float = Field(
+        0.5, description="0.0–1.0 was there a better tool/action available?"
+    )
+    repeated_mistake: bool = Field(
+        False, description="True if this matches a pattern from past failures."
+    )
+
+    # Meta-learning output
+    lesson: str = Field("", description="Natural-language insight about reasoning.")
+    recommended_strategy: Optional[str] = Field(
+        None, description="ReasoningStrategy name to try next for similar perceptions."
+    )
+    strategy_used: Optional[str] = Field(
+        None, description="ReasoningStrategy ID that was active during the decision."
+    )
+    strategy_performance_delta: float = Field(
+        0.0, description="-1.0 to 1.0: how much this strategy helped vs. baseline."
+    )
+    confidence: float = Field(0.5, description="Critic confidence in its evaluation.")

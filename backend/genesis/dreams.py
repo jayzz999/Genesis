@@ -58,6 +58,9 @@ async def imagine(
     if event_callback:
         await event_callback("organism.dreaming_start", {"organism_id": organism_id, "budget": n})
 
+    # Phase 5D: Sleep Consolidation
+    await _sleep_consolidation(org)
+
     perceptions = await _generate_hypothetical_perceptions(org, n=n)
     logger.info(f"[Dreams] org {organism_id} imagining {len(perceptions)} scenarios")
 
@@ -93,7 +96,7 @@ async def _generate_hypothetical_perceptions(org: Organism, *, n: int) -> list[d
         {"trigger": d.trigger, "action": d.action}
         for d in store.all_decisions(org.id, include_dreams=False)[-5:]
     ]
-    prompt = json.dumps({
+    prompt_payload = {
         "intent": org.intent.goal,
         "constraints": org.intent.constraints,
         "recent_real_perceptions": real_history,
@@ -101,7 +104,14 @@ async def _generate_hypothetical_perceptions(org: Organism, *, n: int) -> list[d
             f"Generate exactly {n} diverse hypothetical perception events this "
             f"organism might face in the near future. Return JSON list."
         ),
-    }, indent=2, default=str)
+    }
+
+    # Phase 5E: Curiosity-driven targeted dreaming
+    if org.knowledge_gaps:
+        prompt_payload["knowledge_gaps"] = org.knowledge_gaps
+        prompt_payload["instructions"] += " Specifically tailor events to test boundaries around these knowledge gaps."
+
+    prompt = json.dumps(prompt_payload, indent=2, default=str)
 
     raw = await generate_text(
         prompt=prompt,
@@ -138,3 +148,20 @@ def _extract_json_list(text: str) -> list[dict]:
         except Exception:
             pass
     return []
+
+
+# ── Phase 5D: Memory Tiers ─────────────────────────────────────────────
+
+async def _sleep_consolidation(org: Organism) -> None:
+    """Prune old, low-value dreams to prevent context bloat and disk filling."""
+    dreams = [d for d in store.all_decisions(org.id) if d.is_dream]
+    if len(dreams) > 50:
+        dreams.sort(key=lambda d: d.timestamp)
+        import os
+        pruned = 0
+        for d in dreams[:20]:
+            p = store._organism_dir(org.id) / "decisions" / f"{d.id}.json"
+            if p.exists():
+                os.remove(p)
+                pruned += 1
+        logger.info(f"[Dreams] org {org.id} sleep consolidated: pruned {pruned} old dreams.")

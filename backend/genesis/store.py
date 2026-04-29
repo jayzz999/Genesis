@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Iterator, Optional
 
-from .types import CounterfactualBranch, Decision, Organism
+from .types import CounterfactualBranch, Decision, MetaDecision, Organism, OrganismMessage
 
 _BASE = Path(os.getenv("GENESIS_STORAGE", "organisms")).resolve()
 
@@ -25,6 +25,8 @@ def _organism_dir(organism_id: str) -> Path:
     d = _BASE / organism_id
     (d / "decisions").mkdir(parents=True, exist_ok=True)
     (d / "branches").mkdir(parents=True, exist_ok=True)
+    (d / "meta_decisions").mkdir(parents=True, exist_ok=True)
+    (d / "messages").mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -120,3 +122,65 @@ def list_branches(organism_id: str) -> list[CounterfactualBranch]:
         except Exception:
             continue
     return sorted(out, key=lambda b: b.created_at, reverse=True)
+
+
+# ── Meta-Decisions (Phase 5A — metacognitive reflections) ─────────────
+
+def save_meta_decision(md: MetaDecision) -> None:
+    p = _organism_dir(md.organism_id) / "meta_decisions" / f"{md.id}.json"
+    p.write_text(md.model_dump_json(indent=2))
+
+
+def load_meta_decision(organism_id: str, meta_decision_id: str) -> Optional[MetaDecision]:
+    p = _BASE / organism_id / "meta_decisions" / f"{meta_decision_id}.json"
+    if not p.exists():
+        return None
+    return MetaDecision.model_validate_json(p.read_text())
+
+
+def load_meta_decisions(organism_id: str, *, limit: int = 20) -> list[MetaDecision]:
+    """Load the most recent N meta-decisions for an organism."""
+    d = _BASE / organism_id / "meta_decisions"
+    if not d.exists():
+        return []
+    out = []
+    for f in d.glob("md_*.json"):
+        try:
+            out.append(MetaDecision.model_validate_json(f.read_text()))
+        except Exception:
+            continue
+    out.sort(key=lambda m: m.timestamp, reverse=True)
+    return out[:limit]
+
+
+# ── Messages (Phase 5C — Society) ──────────────────────────────────────
+
+def save_message(msg: OrganismMessage) -> None:
+    # Save into the recipient's inbox, or a global broadcast inbox?
+    # Here we save it into the recipient's dir if directed.
+    # Broadcasts (recipient_id=None) are handled differently in society.py.
+    # Let's save it directly to the intended organism_id we pass.
+    # We will pass the organism_id explicitly or save it based on recipient.
+    # Let's add a `save_message_for` function.
+    pass
+
+def save_message_for(organism_id: str, msg: OrganismMessage) -> None:
+    p = _organism_dir(organism_id) / "messages" / f"{msg.id}.json"
+    p.write_text(msg.model_dump_json(indent=2))
+
+def load_messages(organism_id: str, *, unread_only: bool = False) -> list[OrganismMessage]:
+    """Load messages for an organism."""
+    d = _BASE / organism_id / "messages"
+    if not d.exists():
+        return []
+    out = []
+    for f in d.glob("msg_*.json"):
+        try:
+            msg = OrganismMessage.model_validate_json(f.read_text())
+            if unread_only and msg.read:
+                continue
+            out.append(msg)
+        except Exception:
+            continue
+    out.sort(key=lambda m: m.timestamp)
+    return out

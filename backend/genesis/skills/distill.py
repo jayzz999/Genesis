@@ -75,6 +75,17 @@ async def distill(organism_id: str) -> Optional[str]:
         "decision_count": len(decisions),
         "decisions": compact_decisions,
         "inherited_skills_used": inherited_skill_summaries,
+        # Phase 5A: include meta-cognitive insights in distillation
+        "reasoning_strategies": [
+            {"name": s.name, "success_rate": round(s.success_rate, 2),
+             "usage_count": s.usage_count, "best_for": s.best_for[:3]}
+            for s in sorted(org.reasoning_strategies,
+                            key=lambda x: x.success_rate, reverse=True)[:3]
+        ] if org.reasoning_strategies else [],
+        "meta_lessons": [
+            md.lesson for md in store.load_meta_decisions(organism_id, limit=5)
+            if md.lesson and md.confidence >= 0.6
+        ],
     }
     raw = await generate_text(
         prompt=json.dumps(user_payload, indent=2, default=str),

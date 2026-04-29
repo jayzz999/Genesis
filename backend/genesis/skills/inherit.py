@@ -17,10 +17,13 @@ def resolve_seed_inheritance(
     inherit_from: Optional[list[str]] = None,
     inherit_from_organisms: Optional[list[str]] = None,
     max_inherited_skills: int = 5,
-) -> tuple[list[SkillRef], list[str]]:
-    """Returns (inherited_skills, parent_organism_ids) for the new organism."""
+) -> tuple[list[SkillRef], list[str], list, list]:
+    """Returns (inherited_skills, parent_organism_ids, compiled_mcp_specs,
+    inherited_reasoning_strategies) for the new organism."""
     skill_ids: set[str] = set(inherit_from or [])
     parent_orgs: set[str] = set()
+    # Phase 5A: collect reasoning strategies from ancestors
+    inherited_strategies: list = []
 
     if inherit_from_organisms:
         from .. import store
@@ -32,6 +35,10 @@ def resolve_seed_inheritance(
                     skill_ids.add(sr.skill_id)
                 if o.distilled_skill_id:
                     skill_ids.add(o.distilled_skill_id)
+                # Phase 5A: inherit reasoning strategies with proven success
+                for s in o.reasoning_strategies:
+                    if s.success_rate >= 0.4 and s.usage_count >= 2:
+                        inherited_strategies.append(s)
 
     skills = []
     for sid in skill_ids:
@@ -59,7 +66,7 @@ def resolve_seed_inheritance(
                 args=[compiled_path],
             ))
 
-    return refs, sorted(parent_orgs), compiled_mcp_specs
+    return refs, sorted(parent_orgs), compiled_mcp_specs, inherited_strategies
 
 
 def load_skills_text(organism: Organism) -> str:

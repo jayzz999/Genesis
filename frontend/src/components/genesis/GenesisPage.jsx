@@ -8,6 +8,7 @@ import SkillLibrary from './SkillLibrary'
 import Tour from './Tour'
 import { ORGANISM_TEMPLATES } from './templates'
 import InheritancePicker from './InheritancePicker'
+import MetaCognitionPanel from './MetaCognitionPanel'
 
 export default function GenesisPage() {
   const g = useGenesis()
@@ -16,6 +17,7 @@ export default function GenesisPage() {
     acting, dreaming, seed, perceive, dream, editDecision, promoteBranch, killOrganism,
     addSource, removeSource,
     skills, getSkill, getSkillLineage, deleteSkill,
+    metaCognition, switchStrategy, toggleMetaCognition,
   } = g
 
   const [selectedDecision, setSelectedDecision] = useState(null)
@@ -149,8 +151,22 @@ export default function GenesisPage() {
             </div>
           )}
 
-          <div className="flex-1 overflow-hidden">
-            <DreamStream events={eventLog} />
+          <div className="flex-1 overflow-hidden flex flex-col">
+            <div className="flex-1 overflow-hidden border-b border-forge-border">
+              <DreamStream events={eventLog} />
+            </div>
+            
+            {/* Phase 5A: Meta-Cognition Panel */}
+            <div className="flex-1 overflow-hidden">
+              <div className="h-full overflow-y-auto p-2">
+                <MetaCognitionPanel 
+                  metaCognition={metaCognition} 
+                  activeId={activeId}
+                  switchStrategy={switchStrategy}
+                  toggleMetaCognition={toggleMetaCognition}
+                />
+              </div>
+            </div>
           </div>
         </div>
 

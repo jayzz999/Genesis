@@ -25,7 +25,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import causality, dreams, events, lifecycle, runtime, store
+from . import causality, dreams, events, lifecycle, metacognition, runtime, store
 
 router = APIRouter(prefix="/api/genesis", tags=["genesis"])
 
@@ -76,7 +76,7 @@ async def seed(req: SeedRequest):
     from .skills import inherit as _inherit
     from .types import MCPServerSpec
 
-    inherited_refs, parent_orgs, compiled_mcp_specs = _inherit.resolve_seed_inheritance(
+    inherited_refs, parent_orgs, compiled_mcp_specs, inherited_strategies = _inherit.resolve_seed_inheritance(
         inherit_from=req.inherit_from or None,
         inherit_from_organisms=req.inherit_from_organisms or None,
         max_inherited_skills=req.max_inherited_skills,
@@ -93,6 +93,26 @@ async def seed(req: SeedRequest):
     org.inherited_skills = inherited_refs
     org.parent_organisms = parent_orgs
     org.mcp_servers = mcp_specs
+
+    # Phase 5A: seed default reasoning strategies
+    metacognition.seed_default_strategies(org)
+
+    # Phase 5A: merge inherited strategies from ancestors
+    if inherited_strategies:
+        existing_names = {s.name for s in org.reasoning_strategies}
+        for s in inherited_strategies:
+            if s.name not in existing_names:
+                org.reasoning_strategies.append(s)
+                existing_names.add(s.name)
+            else:
+                # Merge success rates: take the better one
+                for existing in org.reasoning_strategies:
+                    if existing.name == s.name:
+                        if s.success_rate > existing.success_rate:
+                            existing.success_rate = s.success_rate
+                            existing.best_for = list(set(existing.best_for + s.best_for))
+                        break
+
     store.save_organism(org)
 
     await events.emit("organism.seeded", {
@@ -413,4 +433,47 @@ async def sandbox_health_check():
     from .skills.sandbox import sandbox_manager
     results = await sandbox_manager.health_check()
     return {"results": results}
+
+
+# ── Phase 5A: Meta-Cognition ───────────────────────────────────────────
+
+@router.get("/organisms/{organism_id}/metacognition")
+async def get_metacognition(organism_id: str):
+    """Get the full meta-cognitive state: strategy library, critic history, aggregates."""
+    if not store.load_organism(organism_id):
+        raise HTTPException(404, f"organism {organism_id} not found")
+    return metacognition.metacognition_summary(organism_id)
+
+
+class StrategySwitchRequest(BaseModel):
+    strategy_name: str = Field(..., description="Name of the strategy to activate.")
+
+
+@router.post("/organisms/{organism_id}/metacognition/strategy")
+async def switch_strategy(organism_id: str, req: StrategySwitchRequest):
+    """Manually switch the active reasoning strategy."""
+    org = store.load_organism(organism_id)
+    if not org:
+        raise HTTPException(404, f"organism {organism_id} not found")
+    for s in org.reasoning_strategies:
+        if s.name == req.strategy_name:
+            org.active_strategy_id = s.id
+            store.save_organism(org)
+            return {"ok": True, "active_strategy": s.name, "id": s.id}
+    raise HTTPException(404, f"strategy '{req.strategy_name}' not found in organism's library")
+
+
+class MetaCognitionToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/organisms/{organism_id}/metacognition/toggle")
+async def toggle_metacognition(organism_id: str, req: MetaCognitionToggle):
+    """Enable or disable meta-cognitive critic for an organism."""
+    org = store.load_organism(organism_id)
+    if not org:
+        raise HTTPException(404, f"organism {organism_id} not found")
+    org.meta_cognition_enabled = req.enabled
+    store.save_organism(org)
+    return {"ok": True, "meta_cognition_enabled": org.meta_cognition_enabled}
 

@@ -48,6 +48,10 @@ export function useGenesis() {
         if (e.type === 'organism.distilled') {
           loadSkills()
         }
+        // Phase 5A: refresh metacognition on critic events
+        if (activeId && e.organism_id === activeId && e.type === 'organism.meta_critique') {
+          loadMetaCognition(activeId)
+        }
       } catch {}
     }
     return () => ws.close()
@@ -164,6 +168,35 @@ export function useGenesis() {
     await loadOrganisms()
   }, [activeId, loadOrganisms])
 
+  // ── Meta-Cognition (Phase 5A) ─────────────────────────────────
+  const [metaCognition, setMetaCognition] = useState(null)
+
+  const loadMetaCognition = useCallback(async (id) => {
+    try {
+      const r = await fetch(`${HTTP_BASE}/api/genesis/organisms/${id}/metacognition`)
+      const j = await r.json()
+      setMetaCognition(j)
+    } catch { setMetaCognition(null) }
+  }, [])
+
+  const switchStrategy = useCallback(async (orgId, strategyName) => {
+    const r = await fetch(`${HTTP_BASE}/api/genesis/organisms/${orgId}/metacognition/strategy`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy_name: strategyName }),
+    })
+    const j = await r.json()
+    if (j.ok) await loadMetaCognition(orgId)
+    return j
+  }, [loadMetaCognition])
+
+  const toggleMetaCognition = useCallback(async (orgId, enabled) => {
+    const r = await fetch(`${HTTP_BASE}/api/genesis/organisms/${orgId}/metacognition/toggle`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    return await r.json()
+  }, [])
+
   // initial load
   useEffect(() => { loadOrganisms() }, [loadOrganisms])
   useEffect(() => { loadSkills() }, [loadSkills])
@@ -171,18 +204,22 @@ export function useGenesis() {
     if (activeId) {
       loadCausality(activeId)
       loadBranches(activeId)
+      loadMetaCognition(activeId)
     } else {
       setGraph({ nodes: [], edges: [] })
       setBranches([])
+      setMetaCognition(null)
     }
-  }, [activeId, loadCausality, loadBranches])
+  }, [activeId, loadCausality, loadBranches, loadMetaCognition])
 
   return {
     // state
     connected, organisms, activeId, graph, branches, eventLog, acting, dreaming, skills,
+    metaCognition,
     // actions
     setActiveId, seed, perceive, dream, editDecision, promoteBranch, killOrganism,
     addSource, removeSource, loadSkills, getSkill, getSkillLineage, deleteSkill,
+    switchStrategy, toggleMetaCognition, loadMetaCognition,
     refreshGraph: () => activeId && loadCausality(activeId),
     refreshOrganisms: loadOrganisms,
   }

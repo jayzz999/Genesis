@@ -40,22 +40,47 @@ async def _groq_generate_text(
     temperature: float = 0,
     max_tokens: int = 8000,
 ) -> str:
-    """Call Groq (Llama 3.3 70B) — free tier, OpenAI-compatible."""
+    """Call Groq (Llama 3.3 70B) — free tier, OpenAI-compatible.
+
+    Retries up to 3 times with exponential backoff on 429 rate-limit errors.
+    """
+    import asyncio as _asyncio
+
     client = _get_groq_client()
-    # Ensure we don't send gemini models to the groq API
+    # Never send a Gemini model name to Groq
     if model and "gemini" in model:
         model = settings.GROQ_MODEL
-        
-    response = await client.chat.completions.create(
-        model=model or settings.GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    return response.choices[0].message.content or ""
+
+    _model = model or settings.GROQ_MODEL
+    _messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+
+    max_retries = 3
+    base_delay = 5.0  # seconds
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=_model,
+                messages=_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            err_str = str(e).lower()
+            is_rate_limit = "429" in err_str or "rate_limit" in err_str or "rate limit" in err_str
+            if is_rate_limit and attempt < max_retries:
+                delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
+                logger.warning(
+                    f"[Groq] 429 rate-limit on attempt {attempt + 1}/{max_retries + 1}. "
+                    f"Retrying in {delay:.0f}s…"
+                )
+                await _asyncio.sleep(delay)
+            else:
+                raise
 
 
 def get_client() -> genai.Client:

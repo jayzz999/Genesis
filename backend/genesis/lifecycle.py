@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import secrets
 from datetime import datetime, timedelta
 from typing import Any
@@ -44,6 +45,12 @@ _heartbeats: dict[str, asyncio.Task] = {}
 _webhook_index: dict[str, tuple[str, int]] = {}
 # Last activity timestamp per organism (for idle-dream)
 _last_active: dict[str, datetime] = {}
+# Last time each organism checked its society message inbox
+_last_msg_check: dict[str, datetime] = {}
+
+# Minimum seconds between society message-inbox checks per organism.
+# Prevents a broadcast to N organisms from triggering N simultaneous LLM calls.
+_MSG_CHECK_INTERVAL_S: int = int(os.getenv("GENESIS_MSG_CHECK_INTERVAL_S", "30"))
 
 _supervisor_task: asyncio.Task | None = None
 _enabled = os.getenv("GENESIS_LIFECYCLE", "1") not in ("0", "false", "no")
@@ -159,16 +166,21 @@ async def _reconcile() -> None:
             store.save_organism(org)
 
         if org.id not in _heartbeats:
-            t = asyncio.create_task(_heartbeat(org.id), name=f"hb_{org.id}")
+            t = asyncio.create_task(_heartbeat(org.id, startup_jitter=True), name=f"hb_{org.id}")
             _heartbeats[org.id] = t
             _last_active.setdefault(org.id, datetime.utcnow())
 
 
 # ── Per-organism heartbeat ────────────────────────────────────────────
 
-async def _heartbeat(organism_id: str) -> None:
+async def _heartbeat(organism_id: str, startup_jitter: bool = False) -> None:
     """One async loop per organism. Drives interval ticks, polls, and idle dreaming."""
     logger.info(f"[Heartbeat] {organism_id} starting")
+    # Spread newly spawned organisms over a 10s window so they don't all
+    # fire their first perception at the exact same moment.
+    if startup_jitter:
+        await asyncio.sleep(random.uniform(0, 10))
+
     # Per-source last-fired timestamps
     last_fired: dict[int, datetime] = {}
 
@@ -203,6 +215,17 @@ async def _heartbeat(organism_id: str) -> None:
                     logger.warning(f"[Heartbeat] {organism_id} source {i} ({kind}) failed: {e}")
                     last_fired[i] = now  # back off till next tick
 
+            # Phase 5C: Check for unread society messages — throttled to avoid
+            # N organisms all hitting the LLM simultaneously after a broadcast.
+            last_check = _last_msg_check.get(organism_id)
+            if not last_check or (now - last_check).total_seconds() >= _MSG_CHECK_INTERVAL_S:
+                try:
+                    await _check_messages(organism_id)
+                    _last_msg_check[organism_id] = datetime.utcnow()
+                except Exception as e:
+                    logger.warning(f"[Heartbeat] {organism_id} message check failed: {e}")
+                    _last_msg_check[organism_id] = datetime.utcnow()  # back off
+
             # Idle dreaming — skipped entirely when GENESIS_DREAMING=0
             from backend.shared.config import settings as _settings
             if _settings.GENESIS_DREAMING:
@@ -220,7 +243,9 @@ async def _heartbeat(organism_id: str) -> None:
                     except Exception as e:
                         logger.warning(f"[Heartbeat] {organism_id} dreaming failed: {e}")
 
-            await asyncio.sleep(2)
+            # Jitter prevents all organisms from waking at the same moment
+            # when many are alive simultaneously (avoids LLM stampedes).
+            await asyncio.sleep(2 + random.uniform(0, 3))
 
     except asyncio.CancelledError:
         logger.info(f"[Heartbeat] {organism_id} cancelled")
@@ -270,3 +295,23 @@ async def _fire_http_poll(organism_id: str, src: dict) -> None:
     await runtime.perceive(
         organism_id, perception, event_callback=events.make_callback(),
     )
+
+
+async def _check_messages(organism_id: str) -> None:
+    from . import society
+    msgs = store.load_messages(organism_id, unread_only=True)
+    if not msgs:
+        return
+    for msg in msgs:
+        perception = {
+            "type": "incoming_message",
+            "source": "society",
+            "sender_id": msg.sender_id,
+            "message_type": msg.message_type,
+            "payload": msg.content,
+        }
+        await runtime.perceive(
+            organism_id, perception, event_callback=events.make_callback(),
+        )
+        society.mark_read(organism_id, [msg.id])
+        _last_active[organism_id] = datetime.utcnow()
