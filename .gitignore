@@ -14,8 +14,9 @@ dist/
 node_modules/
 frontend/dist/
 
-# Runtime data — organism state, decisions, messages (generated at runtime)
+# Runtime data — generated at runtime, not source
 organisms/
+populations/
 
 # Logs
 *.log

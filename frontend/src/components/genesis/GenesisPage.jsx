@@ -9,6 +9,7 @@ import Tour from './Tour'
 import { ORGANISM_TEMPLATES } from './templates'
 import InheritancePicker from './InheritancePicker'
 import MetaCognitionPanel from './MetaCognitionPanel'
+import PopulationRunner from './PopulationRunner'
 
 export default function GenesisPage() {
   const g = useGenesis()
@@ -27,6 +28,7 @@ export default function GenesisPage() {
   const [seedFromSkillId, setSeedFromSkillId] = useState(null)
   const [perceiveJson, setPerceiveJson] = useState('{\n  "type": "test_event",\n  "payload": {}\n}')
   const [perceiveError, setPerceiveError] = useState(null)
+  const [centerTab, setCenterTab] = useState('graph') // 'graph' | 'population'
 
   const activeOrganism = organisms.find(o => o.id === activeId)
 
@@ -170,8 +172,30 @@ export default function GenesisPage() {
           </div>
         </div>
 
-        {/* Center: causal graph */}
-        <div className="flex-1 relative bg-forge-bg/40">
+        {/* Center: tab bar + panel */}
+        <div className="flex-1 flex flex-col bg-forge-bg/40 overflow-hidden">
+          {/* Tab bar */}
+          <div className="flex items-center gap-1 px-3 pt-2 pb-0 border-b border-forge-border shrink-0">
+            {[
+              { id: 'graph', label: '🕸 Causal Graph' },
+              { id: 'population', label: '🧬 Evolution' },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setCenterTab(tab.id)}
+                className={`text-xs px-3 py-1.5 rounded-t-lg border-b-2 transition-colors ${
+                  centerTab === tab.id
+                    ? 'border-purple-400 text-purple-200 bg-purple-500/10'
+                    : 'border-transparent text-forge-muted hover:text-forge-text'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Graph panel */}
+          <div className={`flex-1 relative ${centerTab !== 'graph' ? 'hidden' : ''}`}>
           {activeId ? (
             <CausalGraph graph={graph} onSelectDecision={setSelectedDecision} />
           ) : (
@@ -200,6 +224,12 @@ export default function GenesisPage() {
               onPromoteBranch={handlePromote}
             />
           )}
+          </div>
+
+          {/* Population panel */}
+          <div className={`flex-1 overflow-hidden ${centerTab !== 'population' ? 'hidden' : ''}`}>
+            <PopulationRunner eventLog={eventLog} />
+          </div>
         </div>
       </div>
 

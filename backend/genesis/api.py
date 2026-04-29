@@ -5,6 +5,11 @@
 
 Endpoints:
   GET    /api/genesis/status                            live runtime health snapshot
+  POST   /api/genesis/population/start                  start an evolution run
+  GET    /api/genesis/population                        list all runs
+  GET    /api/genesis/population/{run_id}               get one run
+  POST   /api/genesis/population/{run_id}/stop          stop a running evolution
+  DELETE /api/genesis/population/{run_id}               delete a run
   POST   /api/genesis/seed                              create organism from intent
   GET    /api/genesis/organisms                         list all organisms
   GET    /api/genesis/organisms/{id}                    one organism
@@ -26,7 +31,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import causality, dreams, events, lifecycle, metacognition, runtime, store
+from . import causality, dreams, events, lifecycle, metacognition, population, runtime, store
 
 router = APIRouter(prefix="/api/genesis", tags=["genesis"])
 
@@ -541,4 +546,101 @@ async def genesis_status():
         },
         "organisms": organism_summary,
     }
+
+
+# ── Population / Evolution endpoints ─────────────────────────────────
+
+class PopulationStartRequest(BaseModel):
+    task: str = Field(..., description="Goal shared by all organisms in the population.")
+    perception: dict = Field(
+        default_factory=dict,
+        description="The perception event fired at every organism each generation.",
+    )
+    n_organisms: int = Field(4, ge=2, le=20, description="Population size.")
+    max_generations: int = Field(3, ge=1, le=20)
+    action_timeout_s: int = Field(90, ge=10, le=600)
+    survival_rate: float = Field(0.5, ge=0.1, le=0.9)
+    min_fitness_to_distill: float = Field(
+        0.5, ge=0.0, le=1.0,
+        description="Minimum fitness score for a survivor to have its experience distilled into a Skill.",
+    )
+
+
+@router.post("/population/start")
+async def start_population(req: PopulationStartRequest):
+    """Start a new population evolution run.
+
+    Organisms are seeded, scored by fitness (reasoning quality + action efficiency),
+    survivors breed the next generation, and skills are distilled from top performers.
+    """
+    perception = req.perception or {
+        "type": "task",
+        "description": req.task,
+    }
+    run = population.new_run(
+        task=req.task,
+        perception=perception,
+        n_organisms=req.n_organisms,
+        max_generations=req.max_generations,
+        action_timeout_s=req.action_timeout_s,
+        survival_rate=req.survival_rate,
+        min_fitness_to_distill=req.min_fitness_to_distill,
+    )
+    population.start(run)
+    return {"ok": True, "run_id": run["id"], "run": run}
+
+
+@router.get("/population")
+async def list_populations():
+    """List all evolution runs (completed, running, stopped)."""
+    runs = population.list_runs()
+    return {
+        "runs": [
+            {
+                "id": r["id"],
+                "task": r["task"],
+                "status": r["status"],
+                "current_generation": r["current_generation"],
+                "max_generations": r["max_generations"],
+                "n_organisms": r["n_organisms"],
+                "is_running": population.is_running(r["id"]),
+                "best_fitness": max(
+                    (g["best_fitness"] for g in r.get("generations", [])),
+                    default=None,
+                ),
+                "created_at": r["created_at"],
+            }
+            for r in runs
+        ]
+    }
+
+
+@router.get("/population/{run_id}")
+async def get_population(run_id: str):
+    """Get the full state of a single evolution run."""
+    run = population.load_run(run_id)
+    if not run:
+        raise HTTPException(404, f"run {run_id} not found")
+    return {**run, "is_running": population.is_running(run_id)}
+
+
+@router.post("/population/{run_id}/stop")
+async def stop_population(run_id: str):
+    """Stop a running evolution after the current generation completes."""
+    ok = population.stop(run_id)
+    if not ok:
+        raise HTTPException(404, f"run {run_id} not found")
+    return {"ok": True, "run_id": run_id}
+
+
+@router.delete("/population/{run_id}")
+async def delete_population(run_id: str):
+    """Delete an evolution run and all its data."""
+    import shutil as _shutil
+    from pathlib import Path as _Path
+    population.stop(run_id)
+    p = _Path("populations") / run_id
+    if p.exists():
+        _shutil.rmtree(p)
+    return {"ok": True}
 

@@ -184,6 +184,11 @@ Genesis/
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/genesis/status` | Live runtime snapshot — heartbeats, LLM rate guard, config |
+| `POST` | `/api/genesis/population/start` | Start a population evolution run |
+| `GET` | `/api/genesis/population` | List all evolution runs |
+| `GET` | `/api/genesis/population/{run_id}` | Get one run (live state) |
+| `POST` | `/api/genesis/population/{run_id}/stop` | Stop a running evolution |
+| `DELETE` | `/api/genesis/population/{run_id}` | Delete a run |
 | `POST` | `/api/genesis/seed` | Create a new organism from intent |
 | `GET` | `/api/genesis/organisms` | List all organisms |
 | `GET` | `/api/genesis/organisms/{id}` | Get one organism |
@@ -197,6 +202,42 @@ Genesis/
 | `GET` | `/api/genesis/skills` | List all distilled skills |
 
 WebSocket: `ws://localhost:8002/ws/{client_id}` — receive live organism events.
+
+---
+
+## Observable Evolution (Phase 6)
+
+The **Evolution** tab in the UI lets you run population-based experiments where organisms compete and breed across generations.
+
+### How it works
+
+1. You define a **task** (a shared goal) and configure population size + generation count
+2. Genesis seeds N organisms, each with default reasoning strategies (systematic, analogical, cautious, exploratory)
+3. The same perception event is fired at all organisms simultaneously
+4. Each organism reasons and acts independently — the meta-cognitive critic scores every decision on **reasoning quality** and **action efficiency**
+5. Fitness is computed: `fitness = 0.6 × reasoning_quality + 0.4 × action_efficiency`
+6. The bottom 50% are culled. Top performers with fitness > 0.5 have their experience **distilled into a Skill**
+7. The next generation is bred: each new organism inherits skills from 1–2 survivor parents
+8. Repeat for the configured number of generations
+
+### What you observe
+
+- Per-organism fitness scores and decision counts after each generation
+- Fitness sparkline tracking best and mean fitness across generations
+- Skills distilled from survivors (visible in the Skill Library)
+- Which organisms survived, which were culled, and who bred the next generation
+
+### Example API call
+
+```bash
+curl -X POST http://localhost:8002/api/genesis/population/start \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task": "Monitor a GitHub repository and summarise new issues daily",
+    "n_organisms": 4,
+    "max_generations": 3
+  }'
+```
 
 ---
 
