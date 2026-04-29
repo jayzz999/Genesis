@@ -4,6 +4,7 @@
     app.include_router(genesis_router)
 
 Endpoints:
+  GET    /api/genesis/status                            live runtime health snapshot
   POST   /api/genesis/seed                              create organism from intent
   GET    /api/genesis/organisms                         list all organisms
   GET    /api/genesis/organisms/{id}                    one organism
@@ -476,4 +477,68 @@ async def toggle_metacognition(organism_id: str, req: MetaCognitionToggle):
     org.meta_cognition_enabled = req.enabled
     store.save_organism(org)
     return {"ok": True, "meta_cognition_enabled": org.meta_cognition_enabled}
+
+
+# ── Runtime status ────────────────────────────────────────────────────
+
+@router.get("/status")
+async def genesis_status():
+    """Live runtime health snapshot.
+
+    Returns the state of:
+    - The lifecycle supervisor (is it running? which organisms have heartbeats?)
+    - Per-organism last-active and last-message-check timestamps
+    - The global LLM rate guard (calls in last 60s vs. limit)
+    - Environment knobs currently in effect
+
+    Useful for debugging rate-limit issues and confirming organisms are alive.
+    """
+    import os
+    from backend.shared.gemini_client import rate_guard_stats
+
+    hb_status = lifecycle.status()
+    llm_stats = rate_guard_stats()
+
+    organisms = store.list_organisms()
+    organism_summary = []
+    for org in organisms:
+        last_active = hb_status["last_active"].get(org.id)
+        last_msg = lifecycle._last_msg_check.get(org.id)
+        organism_summary.append({
+            "id": org.id,
+            "name": org.name,
+            "state": org.state,
+            "heartbeat_alive": org.id in hb_status["alive_organisms"],
+            "last_active": last_active,
+            "last_msg_check": last_msg.isoformat() if last_msg else None,
+            "decision_count": len(store.load_decisions(org.id)),
+            "active_strategy": next(
+                (s.name for s in org.reasoning_strategies if s.id == getattr(org, "active_strategy_id", None)),
+                None,
+            ),
+        })
+
+    return {
+        "lifecycle": {
+            "enabled": hb_status["enabled"],
+            "supervisor_running": hb_status["supervisor_running"],
+            "alive_organism_count": len(hb_status["alive_organisms"]),
+            "webhooks_registered": len(hb_status["webhooks"]),
+        },
+        "llm": {
+            **llm_stats,
+            "provider": os.getenv("GENESIS_LLM_PROVIDER", "gemini"),
+            "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+                     if os.getenv("GENESIS_LLM_PROVIDER") == "groq"
+                     else os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        },
+        "config": {
+            "GENESIS_LIFECYCLE": os.getenv("GENESIS_LIFECYCLE", "1"),
+            "GENESIS_DREAMING": os.getenv("GENESIS_DREAMING", "1"),
+            "GENESIS_IDLE_DREAM_AFTER_S": os.getenv("GENESIS_IDLE_DREAM_AFTER_S", "3600"),
+            "GENESIS_MSG_CHECK_INTERVAL_S": os.getenv("GENESIS_MSG_CHECK_INTERVAL_S", "30"),
+            "GENESIS_MAX_LLM_CALLS_PER_MIN": os.getenv("GENESIS_MAX_LLM_CALLS_PER_MIN", "0"),
+        },
+        "organisms": organism_summary,
+    }
 

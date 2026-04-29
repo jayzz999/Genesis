@@ -7,8 +7,11 @@ All LLM calls go through this module. Provides:
 - get_client() — raw Gemini client access
 """
 
+import collections
 import json
 import logging
+import os
+import time
 from typing import Any, Callable, Coroutine
 
 from google import genai
@@ -22,6 +25,56 @@ _client: genai.Client | None = None
 _groq_client = None  # lazy-initialised when provider=groq
 
 MAX_TOOL_ROUNDS = 15  # Safety limit for tool-calling loops
+
+# ── Global LLM rate guard ─────────────────────────────────────────────
+# Sliding-window counter across ALL organisms. Prevents bursts from
+# many simultaneous heartbeats from exhausting provider quotas.
+# Set GENESIS_MAX_LLM_CALLS_PER_MIN=0 (default) to disable.
+
+_call_timestamps: collections.deque = collections.deque()
+_max_calls_per_min: int = int(os.getenv("GENESIS_MAX_LLM_CALLS_PER_MIN", "0"))
+
+
+async def _rate_guard() -> None:
+    """Block the caller until the sliding-window allows another LLM call.
+
+    Uses a 60-second sliding window. When the window is full the coroutine
+    sleeps just long enough for the oldest call to age out, then proceeds.
+    Disabled when GENESIS_MAX_LLM_CALLS_PER_MIN=0 (the default).
+    """
+    if not _max_calls_per_min:
+        return
+
+    import asyncio as _asyncio
+
+    while True:
+        now = time.monotonic()
+        # Prune calls that have aged out of the 60-second window
+        while _call_timestamps and now - _call_timestamps[0] > 60:
+            _call_timestamps.popleft()
+
+        if len(_call_timestamps) < _max_calls_per_min:
+            _call_timestamps.append(now)
+            return
+
+        # Wait for the oldest call to fall outside the window
+        wait_s = 60.0 - (now - _call_timestamps[0]) + 0.05
+        logger.warning(
+            f"[LLM rate guard] {len(_call_timestamps)}/{_max_calls_per_min} calls in "
+            f"last 60s — waiting {wait_s:.1f}s before next call"
+        )
+        await _asyncio.sleep(wait_s)
+
+
+def rate_guard_stats() -> dict:
+    """Snapshot of the sliding-window for the /status endpoint."""
+    now = time.monotonic()
+    recent = sum(1 for t in _call_timestamps if now - t <= 60)
+    return {
+        "calls_last_60s": recent,
+        "limit_per_min": _max_calls_per_min,
+        "guard_active": _max_calls_per_min > 0,
+    }
 
 
 def _get_groq_client():
@@ -134,7 +187,11 @@ async def generate_text(
 
     Routes to Groq (free, Llama 3.3 70B) when GENESIS_LLM_PROVIDER=groq,
     otherwise uses Gemini (default, for demo/prod).
+
+    All calls pass through the global rate guard (GENESIS_MAX_LLM_CALLS_PER_MIN).
     """
+    await _rate_guard()
+
     if settings.GENESIS_LLM_PROVIDER == "groq":
         return await _groq_generate_text(prompt, system, model, temperature, max_tokens)
 

@@ -183,6 +183,7 @@ Genesis/
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `GET` | `/api/genesis/status` | Live runtime snapshot — heartbeats, LLM rate guard, config |
 | `POST` | `/api/genesis/seed` | Create a new organism from intent |
 | `GET` | `/api/genesis/organisms` | List all organisms |
 | `GET` | `/api/genesis/organisms/{id}` | Get one organism |
@@ -199,24 +200,47 @@ WebSocket: `ws://localhost:8002/ws/{client_id}` — receive live organism events
 
 ---
 
-## Environment Variables
+## Configuration
 
-```env
-# Required
-GEMINI_API_KEY=your_gemini_api_key
+All knobs are set via environment variables. Copy `.env.example` to `.env` and edit.
 
-# LLM provider
-GENESIS_LLM_PROVIDER=gemini   # or "groq"
-GROQ_API_KEY=your_groq_api_key
-GROQ_MODEL=llama-3.3-70b-versatile
+### LLM Provider
 
-# Dreaming (set to 0 during development to save API calls)
-GENESIS_DREAMING=1
-GENESIS_IDLE_DREAM_AFTER_S=3600
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GENESIS_LLM_PROVIDER` | `gemini` | `gemini` or `groq` |
+| `GEMINI_API_KEY` | — | Required when provider is `gemini` |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model name |
+| `GROQ_API_KEY` | — | Required when provider is `groq` |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
 
-# Server
-PORT=8002
+### Rate Limiting
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GENESIS_MAX_LLM_CALLS_PER_MIN` | `0` (off) | Global ceiling across all organisms. When the 60-second sliding window fills, callers sleep until it clears. Set to `20` for Groq free tier. |
+
+### Lifecycle & Heartbeat
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GENESIS_LIFECYCLE` | `1` | Set to `0` to disable all heartbeats. Useful during development — organisms only act when explicitly poked via the API. |
+| `GENESIS_MSG_CHECK_INTERVAL_S` | `30` | Minimum seconds between society inbox checks per organism. Prevents a broadcast to N organisms triggering N simultaneous LLM calls. |
+
+### Dreaming
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GENESIS_DREAMING` | `1` | Set to `0` to disable idle dream cycles entirely (zero extra LLM cost). |
+| `GENESIS_IDLE_DREAM_AFTER_S` | `3600` | Seconds idle before a dream cycle fires. Lower for faster experimentation. |
+
+### Checking live state
+
+```bash
+curl http://localhost:8002/api/genesis/status | python -m json.tool
 ```
+
+Response includes which organisms have active heartbeats, calls in the last 60 seconds vs. the rate limit, and all active config values — without exposing secrets.
 
 ---
 
