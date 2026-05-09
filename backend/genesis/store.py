@@ -5,9 +5,9 @@ Each organism gets a folder under organisms/{id}/:
   - decisions/*.json     — one file per Decision, named by id
   - branches/*.json      — counterfactual branches
 
-JSON remains authoritative for runtime organism bodies. The long-term database
-mirrors organisms and decisions for auth-adjacent control, audit, reconciliation,
-and hosted Postgres/Supabase queries.
+JSON remains authoritative for runtime organism bodies. In hosted deployments
+the long-term database can rehydrate the temporary JSON runtime store after a
+restart, then JSON resumes as the hot runtime source.
 """
 
 from __future__ import annotations
@@ -71,25 +71,84 @@ def save_organism(org: Organism) -> None:
 
 def load_organism(organism_id: str) -> Optional[Organism]:
     p = _BASE / organism_id / "organism.json"
-    if not p.exists():
-        return None
-    try:
-        return Organism.model_validate_json(p.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning("failed to load organism %s from %s: %s", organism_id, p, e)
-        return None
+    if p.exists():
+        try:
+            return Organism.model_validate_json(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("failed to load organism %s from %s: %s", organism_id, p, e)
+            return None
+    return _load_organism_from_long_term(organism_id)
 
 
 def list_organisms() -> list[Organism]:
-    if not _BASE.exists():
-        return []
     out = []
-    for child in _BASE.iterdir():
-        if child.is_dir():
-            org = load_organism(child.name)
-            if org:
-                out.append(org)
+    seen = set()
+    if _BASE.exists():
+        for child in _BASE.iterdir():
+            if child.is_dir():
+                org = load_organism(child.name)
+                if org:
+                    seen.add(org.id)
+                    out.append(org)
+    for org in _list_organisms_from_long_term():
+        if org.id not in seen:
+            seen.add(org.id)
+            out.append(org)
     return sorted(out, key=lambda o: o.born_at, reverse=True)
+
+
+def _load_organism_from_long_term(organism_id: str) -> Optional[Organism]:
+    try:
+        from . import long_term
+        payload = long_term.get_organism_payload(organism_id)
+        if not payload:
+            return None
+        org = Organism.model_validate(payload)
+        _atomic_write_text(_organism_dir(org.id) / "organism.json", org.model_dump_json(indent=2))
+        _hydrate_decisions_from_long_term(org.id)
+        return org
+    except Exception as e:
+        logger.debug("failed to hydrate organism %s from long-term database: %s", organism_id, e)
+        return None
+
+
+def _list_organisms_from_long_term() -> list[Organism]:
+    try:
+        from . import long_term
+        organisms = []
+        for payload in long_term.list_organism_payloads():
+            try:
+                org = Organism.model_validate(payload)
+            except Exception as e:
+                logger.warning("failed to parse long-term organism mirror: %s", e)
+                continue
+            _atomic_write_text(_organism_dir(org.id) / "organism.json", org.model_dump_json(indent=2))
+            _hydrate_decisions_from_long_term(org.id)
+            organisms.append(org)
+        return organisms
+    except Exception as e:
+        logger.debug("failed to list organisms from long-term database: %s", e)
+        return []
+
+
+def _hydrate_decisions_from_long_term(organism_id: str) -> int:
+    try:
+        from . import long_term
+        count = 0
+        for payload in long_term.list_decision_payloads(organism_id):
+            try:
+                decision = Decision.model_validate(payload)
+            except Exception as e:
+                logger.warning("failed to parse long-term decision mirror for %s: %s", organism_id, e)
+                continue
+            p = _organism_dir(organism_id) / "decisions" / f"{decision.id}.json"
+            if not p.exists():
+                _atomic_write_text(p, decision.model_dump_json(indent=2))
+                count += 1
+        return count
+    except Exception as e:
+        logger.debug("failed to hydrate decisions for %s from long-term database: %s", organism_id, e)
+        return 0
 
 
 def reconcile_long_term(*, repair: bool = False) -> dict:

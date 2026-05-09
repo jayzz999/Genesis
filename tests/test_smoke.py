@@ -147,6 +147,38 @@ def test_long_term_supports_supabase_postgres_url_redaction(monkeypatch):
     assert "postgres:***@db.project-ref.supabase.co:5432/postgres" in redacted
 
 
+def test_store_rehydrates_runtime_json_from_long_term_mirror(isolated_genesis, monkeypatch):
+    from backend.genesis import long_term, runtime
+    from backend.genesis.types import Decision
+
+    monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite:///{isolated_genesis / 'rehydrate.db'}")
+    if long_term._CONN is not None:
+        long_term._CONN.close()
+    monkeypatch.setattr(long_term, "_CONN", None)
+    monkeypatch.setattr(long_term, "_CONN_KEY", "")
+
+    org = runtime.seed(intent_goal="Survive hosted restarts.", name="rehydrate")
+    store.save_organism(org)
+    decision = Decision(
+        organism_id=org.id,
+        trigger={"type": "restart_check", "payload": {"ok": True}},
+        reasoning="Mirror survives a Render restart.",
+        action={"name": "noop", "args": {}},
+        result={"ok": True},
+    )
+    store.save_decision(decision)
+
+    monkeypatch.setattr(store, "_BASE", isolated_genesis / "after-render-restart")
+
+    rehydrated = store.load_organism(org.id)
+    assert rehydrated is not None
+    assert rehydrated.id == org.id
+    assert store.load_decisions(org.id)[0].id == decision.id
+
+    listed = store.list_organisms()
+    assert [o.id for o in listed] == [org.id]
+
+
 def test_render_production_normalizes_template_wildcards(monkeypatch):
     import importlib
     import backend.shared.config as config

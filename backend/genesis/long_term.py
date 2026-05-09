@@ -101,6 +101,15 @@ def _json_value(value: dict) -> Any:
     return json.dumps(value, sort_keys=True)
 
 
+def _json_payload(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _connect() -> Any:
     global _CONN, _CONN_KEY, _ENGINE
     engine = _database_engine()
@@ -478,6 +487,37 @@ def upsert_decision(decision: Any) -> None:
         ),
     )
     conn.commit()
+
+
+def list_organism_payloads() -> list[dict]:
+    """Return durable organism mirrors ordered like the runtime JSON store."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT payload_json FROM organism_records ORDER BY born_at DESC, updated_at DESC"
+    ).fetchall()
+    return [_json_payload(_as_dict(row).get("payload_json")) for row in rows]
+
+
+def get_organism_payload(organism_id: str) -> dict | None:
+    conn = _connect()
+    row = conn.execute(
+        _sql("SELECT payload_json FROM organism_records WHERE id = ?"),
+        (organism_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _json_payload(_as_dict(row).get("payload_json"))
+
+
+def list_decision_payloads(organism_id: str) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        _sql(
+            "SELECT payload_json FROM decision_records WHERE organism_id = ? ORDER BY timestamp ASC"
+        ),
+        (organism_id,),
+    ).fetchall()
+    return [_json_payload(_as_dict(row).get("payload_json")) for row in rows]
 
 
 def write_audit(actor: str, action: str, target: str, status: str, payload: dict | None = None) -> dict:
