@@ -2162,7 +2162,7 @@ async def genesis_status():
             "GENESIS_IDLE_DREAM_AFTER_S": os.getenv("GENESIS_IDLE_DREAM_AFTER_S", "3600"),
             "GENESIS_MSG_CHECK_INTERVAL_S": os.getenv("GENESIS_MSG_CHECK_INTERVAL_S", "30"),
             "GENESIS_MAX_LLM_CALLS_PER_MIN": os.getenv("GENESIS_MAX_LLM_CALLS_PER_MIN", "0"),
-            "DATABASE_URL": settings.DATABASE_URL,
+            "DATABASE_URL": long_term.status().get("database", {}).get("url"),
         },
         "long_term": long_term.status(),
         "product_core": product_core.status(),

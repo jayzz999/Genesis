@@ -36,6 +36,7 @@ async def test_seed_status_and_perceive_work_without_api_keys(isolated_genesis):
         status_response = await client.get("/api/genesis/status")
         assert status_response.status_code == 200
         assert status_response.json()["llm"]["provider"] in {"gemini", "mock"}
+        assert "@" not in status_response.json()["config"]["DATABASE_URL"] or "***@" in status_response.json()["config"]["DATABASE_URL"]
 
         perceive_response = await client.post(
             f"/api/genesis/organisms/{organism['id']}/perceive",
