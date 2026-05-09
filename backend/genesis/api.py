@@ -990,7 +990,7 @@ async def repair_long_term_reconciliation(
     if not req.confirm:
         raise HTTPException(
             409,
-            "Set confirm=true to repair the SQLite mirror from the JSON source of truth.",
+            "Set confirm=true to repair the long-term database mirror from the JSON source of truth.",
         )
     return store.reconcile_long_term(repair=True)
 

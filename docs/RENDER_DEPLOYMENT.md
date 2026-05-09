@@ -1,8 +1,9 @@
 # Render Deployment Runbook
 
 Genesis deploys to Render as one Docker web service. The container builds the
-React app, serves it from FastAPI, and stores runtime data on a persistent disk
-mounted at `/app/data`.
+React app, serves it from FastAPI, and uses Supabase/Postgres for durable auth,
+sessions, audit events, and organism/decision mirrors. Render compute can stay
+free/ephemeral.
 
 ## 1. Push The Repo
 
@@ -26,19 +27,23 @@ git push origin <branch-name>
 The Blueprint creates:
 
 - Docker web service: `genesis`
-- Persistent disk: `/app/data`, 5 GB
+- Free Render compute by default
 - Health check: `/api/health`
 - Generated `GENESIS_API_TOKEN`
-- Secret slots for LLM and connector credentials
+- Secret slots for Supabase/Postgres, LLM, and connector credentials
 
 ## 3. Add Required Secrets
 
 In the Render service, open **Environment** and set:
 
 ```bash
+DATABASE_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
 GEMINI_API_KEY=<your Gemini key>
 GROQ_API_KEY=<your Groq key, optional fallback>
 ```
+
+Use the Supabase connection string from **Project Settings → Database**. For
+Render, the pooled connection string is usually best for free/cheap compute.
 
 The Blueprint defaults to Gemini:
 
@@ -54,7 +59,21 @@ Those defaults keep the public demo controlled and avoid surprise background LLM
 usage. Turn lifecycle/dreaming on only after you are comfortable with provider
 limits and connector behavior.
 
-## 4. Add Real Connector Secrets
+## 4. Persistence Model
+
+Genesis uses a hybrid persistence model:
+
+- JSON runtime state is authoritative for full organism bodies, causal graph
+  traversal, branches, and local execution state.
+- Supabase/Postgres is authoritative for users, sessions, audit events, and the
+  queryable organism/decision mirror.
+- Reconciliation is explicit. The repair endpoint backfills missing Postgres
+  mirror rows from JSON runtime state, never the other way around.
+
+This lets the demo run on free Render compute while the security/control plane
+survives sleeps and redeploys.
+
+## 5. Add Real Connector Secrets
 
 Only configure systems you want Genesis to touch:
 
@@ -79,7 +98,7 @@ GENESIS_BROWSER_CONNECTOR_WEBHOOK_URL=<browser executor webhook>
 GENESIS_CONNECTOR_BROWSER_ALLOWLIST=<browser executor host>
 ```
 
-## 5. Host And Auth
+## 6. Host And Auth
 
 On Render, Genesis derives safe same-origin CORS and trusted-host defaults from
 Render metadata. If you add a custom domain, set these explicitly:
@@ -96,7 +115,7 @@ Do not set `VITE_GENESIS_API_TOKEN` in production. The UI should use sessions:
 3. Log in with that user.
 4. The browser stores a session token locally.
 
-## 6. Verify
+## 7. Verify
 
 After deployment:
 

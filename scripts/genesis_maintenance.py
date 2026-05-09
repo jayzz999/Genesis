@@ -54,6 +54,13 @@ def _database_path() -> Path:
     return ROOT / "genesis.db"
 
 
+def _database_engine() -> str:
+    url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./genesis.db")
+    if url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://")):
+        return "postgres"
+    return "sqlite"
+
+
 def _count_json(path: Path, pattern: str) -> int:
     return sum(1 for _ in path.glob(pattern)) if path.exists() else 0
 
@@ -65,6 +72,7 @@ def status() -> dict:
     organism_dirs = [p for p in organisms.iterdir() if p.is_dir()] if organisms.exists() else []
     population_dirs = [p for p in populations.iterdir() if p.is_dir()] if populations.exists() else []
     return {
+        "database_engine": _database_engine(),
         "database_path": str(_database_path()),
         "stores": {name: str(path) for name, path in paths.items()},
         "organisms": len(organism_dirs),
@@ -86,9 +94,10 @@ def snapshot(out: Path) -> dict:
         if path.exists():
             shutil.copytree(path, target / name)
     db = _database_path()
-    for db_path in (db, Path(str(db) + "-wal"), Path(str(db) + "-shm")):
-        if db_path.exists():
-            shutil.copy2(db_path, target / db_path.name)
+    if _database_engine() == "sqlite":
+        for db_path in (db, Path(str(db) + "-wal"), Path(str(db) + "-shm")):
+            if db_path.exists():
+                shutil.copy2(db_path, target / db_path.name)
     report = status()
     report["snapshot_path"] = str(target)
     (target / "manifest.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

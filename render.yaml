@@ -2,13 +2,9 @@ services:
   - type: web
     name: genesis
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
-    disk:
-      name: genesis-data
-      mountPath: /app/data
-      sizeGB: 5
     envVars:
       - key: GENESIS_ENV
         value: production
@@ -57,36 +53,36 @@ services:
       - key: GENESIS_BROWSER_CONNECTOR_WEBHOOK_URL
         sync: false
       - key: DATABASE_URL
-        value: sqlite+aiosqlite:////app/data/genesis.db
+        sync: false
       - key: GENESIS_STORAGE
-        value: /app/data/organisms
+        value: /tmp/genesis/organisms
       - key: GENESIS_POPULATION_STORAGE
-        value: /app/data/populations
+        value: /tmp/genesis/populations
       - key: GENESIS_MEMORY_STORAGE
-        value: /app/data/memories
+        value: /tmp/genesis/memories
       - key: GENESIS_TOOL_SANDBOX_STORAGE
-        value: /app/data/tool_runs
+        value: /tmp/genesis/tool_runs
       - key: GENESIS_COLLAB_STORAGE
-        value: /app/data/collaborations
+        value: /tmp/genesis/collaborations
       - key: GENESIS_IMPROVEMENT_STORAGE
-        value: /app/data/improvements
+        value: /tmp/genesis/improvements
       - key: GENESIS_OPERATOR_STORAGE
-        value: /app/data/operators
+        value: /tmp/genesis/operators
       - key: GENESIS_APPROVAL_STORAGE
-        value: /app/data/approvals
+        value: /tmp/genesis/approvals
       - key: GENESIS_CONNECTOR_STORAGE
-        value: /app/data/connectors
+        value: /tmp/genesis/connectors
       - key: GENESIS_GOVERNANCE_STORAGE
-        value: /app/data/governance
+        value: /tmp/genesis/governance
       - key: GENESIS_CAPABILITY_STORAGE
-        value: /app/data/capabilities
+        value: /tmp/genesis/capabilities
       - key: GENESIS_INTELLIGENCE_STORAGE
-        value: /app/data/intelligence
+        value: /tmp/genesis/intelligence
       - key: GENESIS_RELIABILITY_STORAGE
-        value: /app/data/reliability
+        value: /tmp/genesis/reliability
       - key: GENESIS_WORLD_MODEL_STORAGE
-        value: /app/data/world_model
+        value: /tmp/genesis/world_model
       - key: GENESIS_LIVING_SYSTEMS_STORAGE
-        value: /app/data/living_systems
+        value: /tmp/genesis/living_systems
       - key: GENESIS_NERVOUS_SYSTEM_STORAGE
-        value: /app/data/nervous_system
+        value: /tmp/genesis/nervous_system

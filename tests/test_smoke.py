@@ -94,7 +94,7 @@ async def test_long_term_database_auth_sessions_and_mirrors(isolated_genesis, mo
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             status = await client.get("/api/genesis/long-term/status")
             assert status.status_code == 200
-            assert status.json()["version"] == "organism-long-term-db-auth-v1"
+            assert status.json()["version"] == "organism-long-term-db-auth-v2"
             assert status.json()["database"]["connected"] is True
 
             bootstrapped = await client.post(
@@ -134,6 +134,16 @@ async def test_long_term_database_auth_sessions_and_mirrors(isolated_genesis, mo
     finally:
         monkeypatch.setattr(settings, "GENESIS_REQUIRE_API_TOKEN", False)
         monkeypatch.setattr(settings, "GENESIS_API_TOKEN", "")
+
+
+def test_long_term_supports_supabase_postgres_url_redaction(monkeypatch):
+    from backend.genesis import long_term
+
+    url = "postgresql://postgres:secret-pass@db.project-ref.supabase.co:5432/postgres"
+    assert long_term._database_engine(url) == "postgres"
+    redacted = long_term._redacted_database_url(url)
+    assert "secret-pass" not in redacted
+    assert "postgres:***@db.project-ref.supabase.co:5432/postgres" in redacted
 
 
 @pytest.mark.asyncio
@@ -574,7 +584,9 @@ async def test_json_authoritative_reconciliation_repairs_sqlite_mirror(isolated_
 
     report = store.reconcile_long_term(repair=False)
     assert report["authority"] == "json_store"
+    assert report["database"]["engine"] == "sqlite"
     assert org.id in report["missing_in_sqlite"]["organisms"]
+    assert org.id in report["missing_in_database"]["organisms"]
     assert report["summary"]["missing_total"] >= 1
 
     repaired = store.reconcile_long_term(repair=True)

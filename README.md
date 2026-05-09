@@ -232,7 +232,7 @@ GENESIS_REQUIRE_API_TOKEN=1
 GENESIS_API_TOKEN=<long random secret, at least 24 chars>
 GENESIS_CORS_ORIGINS=https://your-genesis-host.example
 GENESIS_TRUSTED_HOSTS=your-genesis-host.example
-DATABASE_URL=sqlite+aiosqlite:////app/data/genesis.db
+DATABASE_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
 ```
 
 For a trusted browser session that is allowed to mutate the backend, store the
@@ -258,12 +258,12 @@ docker compose up --build
 ```
 
 The container exposes `PORT` (default `8002`), runs as a non-root user, serves
-the compiled React app from FastAPI, and persists all runtime state under one
-named volume mounted at `/app/data`:
+the compiled React app from FastAPI, and supports two persistence modes:
 
-- SQLite auth/control database: `/app/data/genesis.db`
-- organisms, decisions, approvals, permissions, operators, memories, world model,
-  reliability packages, living systems, and nervous-system state
+- local Docker: SQLite plus JSON stores in the named volume at `/app/data`
+- Render/Supabase: Postgres stores auth, sessions, audit events, and queryable
+  organism/decision mirrors; runtime JSON state can live on ephemeral Render disk
+  and be repaired from the JSON source during a live session
 
 Health check:
 
@@ -287,11 +287,12 @@ python scripts/production_preflight.py --create-dirs
 ### Hosted Blueprint
 
 `render.yaml` is included as a production deployment blueprint. It provisions a
-single Docker web service with a persistent disk at `/app/data`, health checks,
-generated API token, and secret slots for the LLM key and exact public host.
+free Docker web service with health checks, generated API token, and secret slots
+for Supabase/Postgres, LLM keys, and real connectors.
 On Render, Genesis can derive safe same-origin CORS/trusted-host defaults from
 Render service metadata. After creating the service, set:
 
+- `DATABASE_URL` to your Supabase/Postgres pooled or direct connection string
 - `GEMINI_API_KEY` or switch provider-specific keys as needed
 - connector credentials and allowlists for the systems you want Genesis to touch
 - `GENESIS_CORS_ORIGINS` / `GENESIS_TRUSTED_HOSTS` only when using a custom domain
@@ -653,7 +654,7 @@ curl http://localhost:8002/api/genesis/status | python -m json.tool
 
 Response includes which organisms have active heartbeats, calls in the last 60 seconds vs. the rate limit, and all active config values — without exposing secrets.
 
-The runtime settings screen can also check and repair the JSON-to-SQLite mirror. Repair is explicit: the API requires `{"confirm": true}` and only backfills SQLite from the JSON source of truth.
+The runtime settings screen can also check and repair the JSON-to-database mirror. Repair is explicit: the API requires `{"confirm": true}` and backfills the configured long-term database from the JSON source of truth.
 
 ---
 

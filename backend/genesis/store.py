@@ -5,8 +5,9 @@ Each organism gets a folder under organisms/{id}/:
   - decisions/*.json     — one file per Decision, named by id
   - branches/*.json      — counterfactual branches
 
-Plain JSON for now. Trivially upgradeable to SQLite/Postgres later when we
-need queries beyond 'load all by organism_id'.
+JSON remains authoritative for runtime organism bodies. The long-term database
+mirrors organisms and decisions for auth-adjacent control, audit, reconciliation,
+and hosted Postgres/Supabase queries.
 """
 
 from __future__ import annotations
@@ -92,11 +93,11 @@ def list_organisms() -> list[Organism]:
 
 
 def reconcile_long_term(*, repair: bool = False) -> dict:
-    """Compare the JSON source of truth with the SQLite mirror.
+    """Compare the JSON source of truth with the long-term database mirror.
 
     JSON remains authoritative for now because runtime loading and decision graph
     traversal still depend on the filesystem store. With repair=True, missing
-    SQLite mirror rows are recreated from JSON.
+    database mirror rows are recreated from JSON.
     """
     organisms = list_organisms()
     decisions = []
@@ -111,10 +112,20 @@ def reconcile_long_term(*, repair: bool = False) -> dict:
             "organisms": len(organisms),
             "decisions": len(decisions),
         },
+        "database": {
+            "engine": None,
+            "connected": False,
+            "organisms": 0,
+            "decisions": 0,
+        },
         "sqlite": {
             "connected": False,
             "organisms": 0,
             "decisions": 0,
+        },
+        "missing_in_database": {
+            "organisms": [],
+            "decisions": [],
         },
         "missing_in_sqlite": {
             "organisms": [],
@@ -134,10 +145,17 @@ def reconcile_long_term(*, repair: bool = False) -> dict:
         from . import long_term
         status = long_term.status()
         tables = status.get("database", {}).get("tables", {})
-        report["sqlite"] = {
+        database_report = {
+            "engine": status.get("database", {}).get("engine"),
             "connected": bool(status.get("database", {}).get("connected")),
             "organisms": int(tables.get("organism_records", 0)),
             "decisions": int(tables.get("decision_records", 0)),
+        }
+        report["database"] = database_report
+        report["sqlite"] = {
+            "connected": database_report["connected"],
+            "organisms": database_report["organisms"],
+            "decisions": database_report["decisions"],
         }
         conn = long_term._connect()  # noqa: SLF001 - intentional reconciliation boundary.
         organism_rows = {
@@ -150,10 +168,12 @@ def reconcile_long_term(*, repair: bool = False) -> dict:
         }
         missing_orgs = [org for org in organisms if org.id not in organism_rows]
         missing_decisions = [d for d in decisions if d.id not in decision_rows]
-        report["missing_in_sqlite"] = {
+        missing_report = {
             "organisms": [org.id for org in missing_orgs],
             "decisions": [d.id for d in missing_decisions],
         }
+        report["missing_in_database"] = missing_report
+        report["missing_in_sqlite"] = missing_report
         report["summary"]["missing_total"] = len(missing_orgs) + len(missing_decisions)
         if repair:
             for org in missing_orgs:
@@ -164,12 +184,17 @@ def reconcile_long_term(*, repair: bool = False) -> dict:
                 report["repaired"]["decisions"] += 1
             status = long_term.status()
             tables = status.get("database", {}).get("tables", {})
-            report["sqlite"]["organisms"] = int(tables.get("organism_records", 0))
-            report["sqlite"]["decisions"] = int(tables.get("decision_records", 0))
+            report["database"]["engine"] = status.get("database", {}).get("engine")
+            report["database"]["connected"] = bool(status.get("database", {}).get("connected"))
+            report["database"]["organisms"] = int(tables.get("organism_records", 0))
+            report["database"]["decisions"] = int(tables.get("decision_records", 0))
+            report["sqlite"]["organisms"] = report["database"]["organisms"]
+            report["sqlite"]["decisions"] = report["database"]["decisions"]
+            report["missing_in_database"] = {"organisms": [], "decisions": []}
             report["missing_in_sqlite"] = {"organisms": [], "decisions": []}
             report["summary"]["missing_total"] = 0
             report["summary"]["repaired_total"] = report["repaired"]["organisms"] + report["repaired"]["decisions"]
-        report["ok"] = not report["missing_in_sqlite"]["organisms"] and not report["missing_in_sqlite"]["decisions"]
+        report["ok"] = not report["missing_in_database"]["organisms"] and not report["missing_in_database"]["decisions"]
     except Exception as e:
         report["error"] = str(e)
     return report

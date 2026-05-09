@@ -95,7 +95,12 @@ def run(*, allow_missing_frontend: bool = False, create_dirs: bool = False) -> d
         checks.append(_check(f"{env_name.lower()}_writable", path.exists() and os.access(path, os.W_OK), str(path)))
 
     db_status = long_term.status()
-    checks.append(_check("long_term_database_connected", db_status.get("database", {}).get("connected") is True, db_status.get("database", {}).get("path", "")))
+    db = db_status.get("database", {})
+    checks.append(_check(
+        "long_term_database_connected",
+        db.get("connected") is True,
+        db.get("path") or db.get("host") or db.get("url", ""),
+    ))
 
     checks.append(_check("dockerfile_present", (ROOT / "Dockerfile").exists()))
     checks.append(_check("compose_present", (ROOT / "docker-compose.yml").exists()))
