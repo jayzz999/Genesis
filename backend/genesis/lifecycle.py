@@ -34,7 +34,8 @@ from typing import Any
 
 import httpx
 
-from . import dreams, events, runtime, store
+from . import dreams, events, nervous_system, runtime, store
+from .types import OrganismState
 
 logger = logging.getLogger("genesis.lifecycle")
 
@@ -140,7 +141,10 @@ async def _supervisor_loop() -> None:
 
 
 async def _reconcile() -> None:
-    organisms = store.list_organisms()
+    organisms = [
+        o for o in store.list_organisms()
+        if o.state not in (OrganismState.DYING, OrganismState.DEAD)
+    ]
     alive_ids = {o.id for o in organisms}
 
     # Reap heartbeats for organisms that no longer exist
@@ -193,6 +197,20 @@ async def _heartbeat(organism_id: str, startup_jitter: bool = False) -> None:
 
             now = datetime.utcnow()
             sources = org.perception_sources or []
+
+            try:
+                ns_state = nervous_system.tick(organism_id, {"type": "heartbeat"})
+                await events.emit("organism.nervous_tick", {
+                    "organism_id": organism_id,
+                    "nervous_system": {
+                        "phase": ns_state.get("phase"),
+                        "mood": ns_state.get("mood"),
+                        "needs": ns_state.get("needs", [])[:3],
+                        "intentions": ns_state.get("intentions", [])[:3],
+                    },
+                })
+            except Exception as e:
+                logger.warning(f"[Heartbeat] {organism_id} nervous system tick failed: {e}")
 
             for i, src in enumerate(sources):
                 kind = src.get("kind")

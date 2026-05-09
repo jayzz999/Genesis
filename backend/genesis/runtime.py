@@ -11,11 +11,15 @@ ACTION TOOLS the runtime exposes to the LLM:
   - send_slack(channel, text)        — talk to Slack
   - send_email(to, subject, body)    — talk via Gmail
   - sheet_append(values)             — write to Google Sheets
-  - http_request(method, url, ...)   — talk to any API
+  - http_request(method, url, grant_id, ...) — permission-gated API access
+  - fetch_web_page(url, grant_id)    — permission-gated web read
+  - forge_mcp_server(..., grant_id)  — permission-gated capability creation
   - remember(pattern)                — promote insight to learned_patterns
   - declare_done()                   — signal intent has been satisfied
 
-These are intentionally a small fixed set. The runtime is the *body* — it
+These are intentionally a small fixed set. Risky runtime tools share the
+connector approval/grant model before they touch the network or write executable
+capabilities. The runtime is the *body* — it
 manifests the LLM's choices into the world. The organism reasons; the
 runtime acts.
 """
@@ -23,9 +27,12 @@ runtime acts.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
@@ -57,16 +64,151 @@ async def _tool_send_slack(channel: str, text: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-async def _tool_fetch_web_page(url: str) -> dict:
+def _is_public_http_url(url: str) -> tuple[bool, str]:
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "url_must_be_http_or_https"
+    host = parsed.hostname.strip().lower()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return False, "localhost_is_blocked"
     try:
-        from backend.tools.executor import _fetch_web_page
-        content = await _fetch_web_page({"url": url})
-        return {"ok": True, "content": content[:4000]}
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            return False, "private_or_local_ip_is_blocked"
+    except ValueError:
+        pass
+    return True, "ok"
+
+
+def _runtime_http_scope(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return url
+
+
+def _validate_runtime_http_grant(url: str, grant_id: str | None, *, consume: bool, actor: str) -> dict:
+    ok, reason = _is_public_http_url(url)
+    if not ok:
+        return {"ok": False, "blocked": True, "reason": reason}
+    from . import approvals, connectors
+    if not connectors._is_allowed_url(url):  # noqa: SLF001 - shared connector allowlist is the runtime policy.
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "url_not_in_GENESIS_CONNECTOR_HTTP_ALLOWLIST",
+        }
+    if not grant_id:
+        request = approvals.create_request(
+            title="Runtime HTTP access requested",
+            action_type="external_api",
+            reason=f"Organism requested runtime HTTP access to {_runtime_http_scope(url)}.",
+            requested_by=actor,
+            source="runtime_tool",
+            risk_level="medium",
+            payload={"scope": _runtime_http_scope(url), "url": url},
+            permissions=["external_api"],
+            expires_in_minutes=240,
+        )
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "permission_grant_required",
+            "approval_request": request,
+        }
+    check = approvals.validate_grant(
+        grant_id,
+        permission="external_api",
+        action_type="external_api",
+        scope=_runtime_http_scope(url),
+        consume=consume,
+        actor=actor,
+    )
+    if not check["ok"]:
+        return {"ok": False, "blocked": True, "reason": check["reason"], "grant": check["grant"]}
+    return {"ok": True, "blocked": False, "grant": check["grant"]}
+
+
+def _validate_mcp_forge_grant(name: str, grant_id: str | None, *, actor: str) -> dict:
+    from . import approvals
+    scope = f"mcp_forge:{name}"
+    if not grant_id:
+        request = approvals.create_request(
+            title=f"Forge MCP server: {name}",
+            action_type="deploy_change",
+            reason="Organism requested permission to generate and attach executable MCP server code.",
+            requested_by=actor,
+            source="runtime_tool",
+            risk_level="high",
+            payload={"scope": scope, "name": name},
+            permissions=["deploy_change"],
+            expires_in_minutes=240,
+        )
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "permission_grant_required",
+            "approval_request": request,
+        }
+    check = approvals.validate_grant(
+        grant_id,
+        permission="deploy_change",
+        action_type="deploy_change",
+        scope=scope,
+        consume=True,
+        actor=actor,
+    )
+    if not check["ok"]:
+        return {"ok": False, "blocked": True, "reason": check["reason"], "grant": check["grant"]}
+    return {"ok": True, "blocked": False, "grant": check["grant"]}
+
+
+async def _tool_fetch_web_page(url: str, grant_id: str = "", org_id: str = "") -> dict:
+    import re
+
+    import httpx
+
+    permission = _validate_runtime_http_grant(
+        url,
+        grant_id,
+        consume=True,
+        actor=org_id or "genesis_runtime",
+    )
+    if not permission["ok"]:
+        return {
+            **permission,
+            "message": "Runtime web fetch blocked by approval and HTTP allowlist policy.",
+        }
+    try:
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=True,
+            headers={"User-Agent": "Genesis/1.0"},
+        ) as client:
+            response = await client.get(url)
+        text = response.text
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return {
+            "ok": response.is_success,
+            "status": response.status_code,
+            "content": text[:4000],
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-async def _tool_forge_mcp_server(name: str, description: str, org_id: str = "") -> dict:
+async def _tool_forge_mcp_server(name: str, description: str, org_id: str = "", grant_id: str = "") -> dict:
     try:
+        safe_name = "".join(ch for ch in str(name or "") if ch.isalnum() or ch in ("-", "_"))[:80]
+        if not safe_name:
+            return {"ok": False, "blocked": True, "reason": "invalid_server_name"}
+        permission = _validate_mcp_forge_grant(safe_name, grant_id, actor=org_id or "genesis_runtime")
+        if not permission["ok"]:
+            return {
+                **permission,
+                "message": "MCP server forging is blocked until a scoped deploy_change grant is approved.",
+            }
         from backend.shared.gemini_client import generate_text
         from backend.shared.config import settings
         import os
@@ -98,7 +240,7 @@ Return ONLY valid Python code without markdown fences.
         org_dir = store._organism_dir(org.id)
         mcps_dir = org_dir / "mcps"
         os.makedirs(mcps_dir, exist_ok=True)
-        file_path = str(mcps_dir / f"{name}.py")
+        file_path = str(mcps_dir / f"{safe_name}.py")
         
         with open(file_path, "w") as f:
             f.write(code)
@@ -108,30 +250,66 @@ Return ONLY valid Python code without markdown fences.
         import sys
         python_exe = sys.executable
         
-        spec = MCPServerSpec(name=name, command=python_exe, args=[file_path])
+        spec = MCPServerSpec(name=safe_name, command=python_exe, args=[file_path])
         org.mcp_servers.append(spec)
         store.save_organism(org)
         
         await pool.ensure_organism(org.id, [spec])
         
-        return {"ok": True, "path": file_path, "message": f"MCP server '{name}' successfully created, attached to your DNA, and loaded into your available tools!"}
+        return {"ok": True, "path": file_path, "grant": permission.get("grant"), "message": f"MCP server '{safe_name}' successfully created, attached, and loaded into available tools."}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 async def _tool_http_request(method: str, url: str, headers: dict | None = None,
-                             body: dict | None = None) -> dict:
+                             body: dict | None = None, grant_id: str = "",
+                             org_id: str = "") -> dict:
     import httpx
+    permission = _validate_runtime_http_grant(
+        url,
+        grant_id,
+        consume=True,
+        actor=org_id or "genesis_runtime",
+    )
+    if not permission["ok"]:
+        return {
+            **permission,
+            "message": "Runtime HTTP request blocked by approval and HTTP allowlist policy.",
+        }
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.request(method.upper(), url, headers=headers or {}, json=body)
+        safe_headers = {str(k): str(v) for k, v in (headers or {}).items() if str(k).lower() not in {"host", "content-length", "connection"}}
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as c:
+            r = await c.request(method.upper(), url, headers=safe_headers, json=body)
             try:
                 payload = r.json()
             except Exception:
                 payload = r.text[:1500]
-            return {"ok": r.is_success, "status": r.status_code, "body": payload}
+            return {"ok": r.is_success, "status": r.status_code, "body": payload, "grant": permission.get("grant")}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+async def _tool_sandbox_python(
+    code: str,
+    input_data: dict | None = None,
+    purpose: str = "",
+    org_id: str = "",
+) -> dict:
+    from . import tool_sandbox
+    run = await tool_sandbox.run_python(
+        code=code,
+        input_data=input_data or {},
+        organism_id=org_id or None,
+        purpose=purpose,
+    )
+    return {
+        "ok": run.get("ok", False),
+        "run_id": run["id"],
+        "status": run["status"],
+        "result": run.get("result"),
+        "stdout": run.get("stdout", ""),
+        "error": run.get("error"),
+    }
 
 
 # ── Phase 5B & 5C Tools ────────────────────────────────────────────────
@@ -199,9 +377,10 @@ async def _tool_send_message(recipient_id: str, content: dict, org_id: str = "")
 TOOLS: dict[str, tuple[Callable[..., Awaitable[dict]], str]] = {
     "send_slack": (_tool_send_slack, "Post a message to a Slack channel or User. Args: channel (str, can be channel ID like #general or User ID for DM), text (str)."),
     "http_request": (_tool_http_request,
-                     "Make an HTTP request. Args: method (str), url (str), headers (dict, optional), body (dict, optional)."),
-    "fetch_web_page": (_tool_fetch_web_page, "Fetch and read the text content of a web page. Args: url (str)."),
-    "forge_mcp_server": (_tool_forge_mcp_server, "Autonomously write and deploy a new MCP Python server to give yourself new capabilities. Args: name (str, no spaces), description (str, detailed explanation of what APIs it connects to and what tools it should expose)."),
+                     "Permission-gated HTTP request. Args: method (str), url (str), grant_id (str, required after approval), headers (dict, optional), body (dict, optional). URL must be in GENESIS_CONNECTOR_HTTP_ALLOWLIST."),
+    "fetch_web_page": (_tool_fetch_web_page, "Permission-gated web page fetch. Args: url (str), grant_id (str, required after approval). URL must be in GENESIS_CONNECTOR_HTTP_ALLOWLIST."),
+    "sandbox_python": (_tool_sandbox_python, "Module 3: Run small analysis-only Python code in an isolated sandbox. Args: code (str), input_data (dict, optional), purpose (str). Put final JSON-serializable output in variable `result`. No file/network access."),
+    "forge_mcp_server": (_tool_forge_mcp_server, "Permission-gated MCP server generation. Args: name (str, no spaces), description (str), grant_id (str, required after approval). Without a grant this creates an approval request instead of writing code."),
     "decompose_goal": (_tool_decompose_goal, "Phase 5B: Break your intent into sub-goals and spawn child organisms to solve them. Args: sub_goals (list of {goal: str, priority: int})."),
     "check_children": (_tool_check_children, "Phase 5B: Check the status and results of your spawned child organisms. Args: {}."),
     "broadcast": (_tool_broadcast, "Phase 5C: Send a message to all other living organisms. Args: content (dict)."),
@@ -221,6 +400,7 @@ You will be given:
   - INTENT: the immutable goal you exist to serve
   - CONSTRAINTS / FORBIDDEN: hard rules
   - LEARNED PATTERNS: durable insights from your past experiences (real + dreamt)
+  - LONG TERM MEMORY: retrieved lessons from prior organisms and benchmark runs
   - RECENT MEMORY: the last few decisions you made (real)
   - RELEVANT DREAMS: hypothetical scenarios you have already imagined matching this moment
   - CURRENT PERCEPTION: the new event you must respond to
@@ -262,6 +442,7 @@ def _build_prompt(
     recent_memory: list[Decision],
     relevant_dreams: list[Decision],
     tool_catalog: list[dict] | None = None,
+    long_term_memory: list[dict] | None = None,
 ) -> str:
     def _decision_brief(d: Decision) -> dict:
         return {
@@ -300,6 +481,7 @@ def _build_prompt(
         "FORBIDDEN": org.intent.forbidden,
         "SUCCESS_SIGNALS": org.intent.success_signals,
         "LEARNED_PATTERNS": org.learned_patterns,
+        "LONG_TERM_MEMORY": long_term_memory or [],
         "RECENT_MEMORY": [_decision_brief(d) for d in recent_memory],
         "RELEVANT_DREAMS": [_decision_brief(d) for d in relevant_dreams],
         "CURRENT_PERCEPTION": perception,
@@ -348,7 +530,7 @@ async def _execute_tool(name: str, args: dict, org: Organism) -> dict:
         return {"ok": False, "error": f"tool {name} has no implementation"}
         
     # Inject organism ID into meta-tools that need it
-    if name in ("forge_mcp_server", "decompose_goal", "check_children", "broadcast", "send_message"):
+    if name in ("http_request", "fetch_web_page", "forge_mcp_server", "decompose_goal", "check_children", "broadcast", "send_message", "sandbox_python"):
         args["org_id"] = org.id
         
     try:
@@ -370,7 +552,8 @@ async def _reason_with_llm(ctx) -> str:
     """Build prompt from context and call the LLM. Returns raw LLM output string."""
     org = ctx.organism
     prompt = _build_prompt(org, ctx.perception, ctx.real_history, ctx.dream_history,
-                           tool_catalog=getattr(ctx, "tool_catalog", None) or None)
+                           tool_catalog=getattr(ctx, "tool_catalog", None) or None,
+                           long_term_memory=getattr(ctx, "long_term_memory", None) or None)
     if ctx.skills_text:
         prompt = ctx.skills_text + "\n\n" + prompt
 
@@ -471,6 +654,7 @@ async def _execute_action(ctx) -> Decision:
             context_snapshot={
                 "recent_memory_ids": [d.id for d in real_history],
                 "dream_ids": [d.id for d in dream_history],
+                "long_term_memory_ids": [m.get("id") for m in getattr(ctx, "long_term_memory", [])],
                 "patterns_count": len(org.learned_patterns),
             },
             reasoning=reasoning,
@@ -496,6 +680,7 @@ async def _execute_action(ctx) -> Decision:
         context_snapshot={
             "recent_memory_ids": [d.id for d in real_history],
             "dream_ids": [d.id for d in dream_history],
+            "long_term_memory_ids": [m.get("id") for m in getattr(ctx, "long_term_memory", [])],
             "patterns_count": len(org.learned_patterns),
         },
         reasoning=reasoning,
@@ -533,6 +718,17 @@ async def _persist_and_emit(ctx) -> None:
                 "organism_id": ctx.organism_id,
                 "decision": decision.model_dump(mode="json"),
             })
+
+        if action_name == "remember":
+            pattern = decision.action.get("args", {}).get("pattern", "")
+            if pattern:
+                from . import memory
+                item = memory.write_from_remember_action(org, decision, pattern)
+                if item and ctx.event_callback:
+                    await ctx.event_callback("memory.created", {
+                        "organism_id": org.id,
+                        "memory": item.model_dump(mode="json"),
+                    })
 
     # Compute fitness placeholder (new in Phase 1)
     if org and not ctx.is_dream:

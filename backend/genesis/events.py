@@ -36,6 +36,96 @@ EVENT_TYPES = {
     "organism.branch_promoted",  # branch became canonical reality
     "organism.died",             # organism removed
     "organism.distilled",        # organism's life distilled into a Skill
+    "organism.meta_critique",    # reasoning quality critique recorded
+    "organism.nervous_tick",     # drives, needs, and autonomous intentions updated
+    "organism.intention_completed",
+    "organism.autonomy_cycle",
+    "organism.body_mapped",
+    "organism.sensor_attached",
+    "organism.metabolism_recovered",
+    "organism.homeostasis_checked",
+    "organism.immune_response",
+    "organism.reproduced",
+    "organism.sleep_consolidated",
+    "organism.development_tick",
+    "organism.selection_round",
+    "organism.temperament_calibrated",
+    "organism.goal_refinement_proposed",
+    "organism.culture_pulse",
+    "organism.budget_pulse",
+    "organism.world_sandbox_pulse",
+    "auth.bootstrap",
+    "auth.login",
+    "auth.logout",
+    "memory.created",            # Module 2 durable memory written
+    "curriculum.updated",        # Module 2 curriculum changed after benchmark run
+    "tool_sandbox.completed",    # Module 3 sandbox tool run completed
+    "collaboration.started",     # Module 4 debate run started
+    "collaboration.proposals_ready",
+    "collaboration.critiques_ready",
+    "collaboration.completed",
+    "collaboration.failed",
+    "self_improvement.started",  # Module 5 gated self-improvement cycle
+    "self_improvement.candidate_ready",
+    "self_improvement.completed",
+    "self_improvement.failed",
+    "operator.created",          # Module 6 persistent autonomous operator
+    "operator.paused",
+    "operator.resumed",
+    "operator.tick_started",
+    "operator.tick_completed",
+    "operator.completed",
+    "operator.failed",
+    "approval.requested",        # Module 7 human permission gate requested
+    "approval.approved",
+    "approval.rejected",
+    "approval.confirmed",
+    "approval.executed",
+    "approval.break_glass",
+    "approval.expired",
+    "approval.policy_evaluated",
+    "approval.integrity_verified",
+    "approval.integrity_failed",
+    "permission.granted",       # Module 8 scoped permission grants
+    "permission.checked",
+    "permission.denied",
+    "permission.consumed",
+    "permission.revoked",
+    "connector.started",        # Module 9 permission-gated connector adapters
+    "connector.completed",
+    "connector.blocked",
+    "connector.failed",
+    "connector.artifact_written",
+    "governance.drill_completed",     # Module 14..23 assurance and operations
+    "governance.replay_completed",
+    "governance.intent_bound",
+    "governance.evidence_created",
+    "governance.evaluation_completed",
+    "governance.lockdown_changed",
+    "capability.drill_completed",     # Module 24..33 capability growth
+    "capability.task_graph_created",
+    "capability.task_completed",
+    "capability.research_completed",
+    "intelligence.drill_completed",   # Module 34..43 product intelligence
+    "intelligence.knowledge_graph_built",
+    "intelligence.goal_contract_created",
+    "intelligence.data_classified",
+    "intelligence.feedback_recorded",
+    "intelligence.release_created",
+    "reliability.drill_completed",    # Module 44..53 reliability and mission execution
+    "reliability.benchmark_created",
+    "reliability.mission_created",
+    "reliability.workstyle_recorded",
+    "world.learning_completed",
+    "world.entity_recorded",
+    "world.evidence_recorded",
+    "world.belief_recorded",
+    "world.snapshot_created",
+    "population.generation_start",
+    "population.scored",
+    "population.generation_complete",
+    "population.generation_bred",
+    "population.complete",
 }
 
 

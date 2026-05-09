@@ -1,0 +1,35 @@
+services:
+  genesis:
+    build: .
+    ports:
+      - "${PORT:-8002}:8002"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/genesis.db
+      GENESIS_STORAGE: /app/data/organisms
+      GENESIS_POPULATION_STORAGE: /app/data/populations
+      GENESIS_MEMORY_STORAGE: /app/data/memories
+      GENESIS_TOOL_SANDBOX_STORAGE: /app/data/tool_runs
+      GENESIS_COLLAB_STORAGE: /app/data/collaborations
+      GENESIS_IMPROVEMENT_STORAGE: /app/data/improvements
+      GENESIS_OPERATOR_STORAGE: /app/data/operators
+      GENESIS_APPROVAL_STORAGE: /app/data/approvals
+      GENESIS_CONNECTOR_STORAGE: /app/data/connectors
+      GENESIS_GOVERNANCE_STORAGE: /app/data/governance
+      GENESIS_CAPABILITY_STORAGE: /app/data/capabilities
+      GENESIS_INTELLIGENCE_STORAGE: /app/data/intelligence
+      GENESIS_RELIABILITY_STORAGE: /app/data/reliability
+      GENESIS_WORLD_MODEL_STORAGE: /app/data/world_model
+      GENESIS_LIVING_SYSTEMS_STORAGE: /app/data/living_systems
+      GENESIS_NERVOUS_SYSTEM_STORAGE: /app/data/nervous_system
+    volumes:
+      - genesis-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  genesis-data:

@@ -19,7 +19,7 @@ const STYLES = {
 function summarize(e) {
   switch (e.type) {
     case 'organism.acted':
-      return e.decision?.action?.tool || e.decision?.action?.type || ''
+      return e.decision?.action?.name || e.decision?.action?.tool || e.decision?.action?.type || ''
     case 'organism.dreamt':
       return `${e.i}/${e.of} — ${e.perception?.type || ''}`
     case 'organism.reasoning':

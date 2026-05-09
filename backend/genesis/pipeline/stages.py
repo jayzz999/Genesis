@@ -33,6 +33,7 @@ class PipelineContext:
     real_history: list[Decision] = field(default_factory=list)
     dream_history: list[Decision] = field(default_factory=list)
     skills_text: str = ""
+    long_term_memory: list[dict] = field(default_factory=list)
     tool_catalog: list[dict] = field(default_factory=list)
     llm_raw: str = ""
     parsed: dict = field(default_factory=dict)
@@ -63,6 +64,11 @@ async def gather_context(ctx: PipelineContext) -> None:
     ctx.dream_history = [d for d in all_decisions if d.is_dream][-5:]
     from ..skills import inherit
     ctx.skills_text = inherit.load_skills_text(ctx.organism)
+    from .. import memory
+    ctx.long_term_memory = [
+        item.model_dump(mode="json")
+        for item in memory.retrieve(ctx.organism, ctx.perception, limit=5)
+    ]
 
 
 async def load_capabilities(ctx: PipelineContext) -> None:

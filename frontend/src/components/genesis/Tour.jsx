@@ -15,6 +15,11 @@ export default function Tour({ open, onClose, g }) {
   const [step, setStep] = useState(0)
   const [running, setRunning] = useState(false)
   const stateRef = useRef({ orgId: null, decisionId: null, branchId: null })
+  const genesisRef = useRef(g)
+
+  useEffect(() => {
+    genesisRef.current = g
+  }, [g])
 
   useEffect(() => {
     if (!open) { setStep(0); setRunning(false); stateRef.current = {orgId:null,decisionId:null,branchId:null}; return }
@@ -29,14 +34,14 @@ export default function Tour({ open, onClose, g }) {
       setStep(i)
       const s = STEPS[i]
       try {
-        await doAction(s.action, stateRef.current, g)
+        await doAction(s.action, stateRef.current, genesisRef.current)
       } catch (e) { console.error('[Tour] step failed:', e) }
       await new Promise(r => setTimeout(r, s.ms))
       runStep(i + 1)
     }
     runStep(0)
     return () => { cancelled = true }
-  }, [open, g])
+  }, [open])
 
   if (!open) return null
   const s = STEPS[step]
@@ -82,7 +87,7 @@ async function doAction(name, state, g) {
         if (real) {
           state.decisionId = real.id
           const branch = await g.editDecision(state.orgId, real.id, {
-            new_action: { tool: 'send_slack', args: { channel: '#vip', text: 'Escalated' } },
+            new_action: { name: 'send_slack', args: { channel: '#vip', text: 'Escalated' } },
             new_reasoning: 'Tour edit: prefer escalation for VIP urgent emails.',
           })
           if (branch?.branch?.id) state.branchId = branch.branch.id

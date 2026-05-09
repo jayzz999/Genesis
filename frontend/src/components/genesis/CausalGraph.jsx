@@ -63,7 +63,7 @@ function NodeCard({ data }) {
         <span className="text-[9px] opacity-50">{data.raw.id?.slice(2, 8)}</span>
       </div>
       <div className="font-semibold truncate">
-        {data.raw.action?.tool || data.raw.trigger?.type || 'noop'}
+        {data.raw.action?.name || data.raw.action?.tool || data.raw.trigger?.type || 'noop'}
       </div>
       <div className="text-[10px] opacity-70 line-clamp-2 mt-0.5">
         {data.raw.reasoning?.slice(0, 90) || '—'}

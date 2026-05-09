@@ -9,6 +9,8 @@ dist/
 
 # Environment
 .env
+.env.*
+!.env.example
 
 # Node
 node_modules/
@@ -17,6 +19,23 @@ frontend/dist/
 # Runtime data — generated at runtime, not source
 organisms/
 populations/
+approvals/
+capabilities/
+collaborations/
+connectors/
+governance/
+improvements/
+intelligence/
+living_systems/
+memories/
+nervous_system/
+operators/
+reliability/
+tool_runs/
+world_model/
+genesis.db-shm
+genesis.db-wal
+:memory:
 
 # Logs
 *.log

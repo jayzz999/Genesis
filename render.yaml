@@ -1,0 +1,92 @@
+services:
+  - type: web
+    name: genesis
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    disk:
+      name: genesis-data
+      mountPath: /app/data
+      sizeGB: 5
+    envVars:
+      - key: GENESIS_ENV
+        value: production
+      - key: GENESIS_LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GENESIS_MAX_LLM_CALLS_PER_MIN
+        value: "6"
+      - key: GENESIS_LIFECYCLE
+        value: "0"
+      - key: GENESIS_DREAMING
+        value: "0"
+      - key: GENESIS_REQUIRE_API_TOKEN
+        value: "1"
+      - key: GENESIS_API_TOKEN
+        generateValue: true
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GENESIS_GITHUB_TOKEN
+        sync: false
+      - key: GENESIS_GITHUB_REPOSITORIES
+        sync: false
+      - key: GENESIS_CONNECTOR_HTTP_ALLOWLIST
+        sync: false
+      - key: GENESIS_CONNECTOR_WEBHOOK_ALLOWLIST
+        sync: false
+      - key: GENESIS_CONNECTOR_DEPLOY_ALLOWLIST
+        sync: false
+      - key: GENESIS_CONNECTOR_BROWSER_ALLOWLIST
+        sync: false
+      - key: GENESIS_MESSAGE_WEBHOOK_URL
+        sync: false
+      - key: GENESIS_SLACK_WEBHOOK_URL
+        sync: false
+      - key: GENESIS_DEPLOY_WEBHOOK_URL
+        sync: false
+      - key: GENESIS_BROWSER_CONNECTOR_ENABLED
+        value: "0"
+      - key: GENESIS_BROWSER_CONNECTOR_WEBHOOK_URL
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:////app/data/genesis.db
+      - key: GENESIS_STORAGE
+        value: /app/data/organisms
+      - key: GENESIS_POPULATION_STORAGE
+        value: /app/data/populations
+      - key: GENESIS_MEMORY_STORAGE
+        value: /app/data/memories
+      - key: GENESIS_TOOL_SANDBOX_STORAGE
+        value: /app/data/tool_runs
+      - key: GENESIS_COLLAB_STORAGE
+        value: /app/data/collaborations
+      - key: GENESIS_IMPROVEMENT_STORAGE
+        value: /app/data/improvements
+      - key: GENESIS_OPERATOR_STORAGE
+        value: /app/data/operators
+      - key: GENESIS_APPROVAL_STORAGE
+        value: /app/data/approvals
+      - key: GENESIS_CONNECTOR_STORAGE
+        value: /app/data/connectors
+      - key: GENESIS_GOVERNANCE_STORAGE
+        value: /app/data/governance
+      - key: GENESIS_CAPABILITY_STORAGE
+        value: /app/data/capabilities
+      - key: GENESIS_INTELLIGENCE_STORAGE
+        value: /app/data/intelligence
+      - key: GENESIS_RELIABILITY_STORAGE
+        value: /app/data/reliability
+      - key: GENESIS_WORLD_MODEL_STORAGE
+        value: /app/data/world_model
+      - key: GENESIS_LIVING_SYSTEMS_STORAGE
+        value: /app/data/living_systems
+      - key: GENESIS_NERVOUS_SYSTEM_STORAGE
+        value: /app/data/nervous_system
