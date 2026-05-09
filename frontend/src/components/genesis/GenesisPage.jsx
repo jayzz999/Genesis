@@ -285,7 +285,7 @@ export default function GenesisPage() {
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Left rail: organism list + nucleus + controls */}
-        <div className={`${hiddenLeftRailTabs.has(activeTab) ? 'hidden' : 'flex'} w-[340px] min-w-[300px] border-r border-forge-border flex-col`}>
+        <div className={`${hiddenLeftRailTabs.has(activeTab) ? 'hidden' : 'flex'} w-[340px] min-w-[300px] border-r border-forge-border flex-col overflow-y-auto overflow-x-hidden`}>
           <div className="p-3 border-b border-forge-border">
             <div className="text-[10px] uppercase tracking-widest text-forge-muted mb-2">Organisms ({organisms.length})</div>
             <input
