@@ -146,6 +146,22 @@ def test_long_term_supports_supabase_postgres_url_redaction(monkeypatch):
     assert "postgres:***@db.project-ref.supabase.co:5432/postgres" in redacted
 
 
+def test_render_production_normalizes_template_wildcards(monkeypatch):
+    import importlib
+    import backend.shared.config as config
+
+    monkeypatch.setenv("GENESIS_ENV", "production")
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://genesis-demo.onrender.com")
+    monkeypatch.setenv("GENESIS_CORS_ORIGINS", "*")
+    monkeypatch.setenv("GENESIS_TRUSTED_HOSTS", "*")
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.settings.GENESIS_CORS_ORIGINS == ["https://genesis-demo.onrender.com"]
+        assert reloaded.settings.GENESIS_TRUSTED_HOSTS == ["genesis-demo.onrender.com"]
+    finally:
+        importlib.reload(config)
+
+
 @pytest.mark.asyncio
 async def test_webhook_source_gets_token_and_accepts_delivery(isolated_genesis):
     transport = ASGITransport(app=app)

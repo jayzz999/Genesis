@@ -42,12 +42,22 @@ def _default_trusted_hosts() -> str:
     return "*"
 
 
+def _production_safe_csv_env(name: str, default: str = "") -> list[str]:
+    value = os.getenv(name, default)
+    if os.getenv("GENESIS_ENV", "development").lower() == "production" and value.strip() == "*":
+        if name == "GENESIS_CORS_ORIGINS" and _render_external_url():
+            value = _render_external_url()
+        elif name == "GENESIS_TRUSTED_HOSTS" and _render_host():
+            value = _render_host()
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class Settings:
     GENESIS_ENV: str = os.getenv("GENESIS_ENV", "development").lower()
     GENESIS_API_TOKEN: str = os.getenv("GENESIS_API_TOKEN", "")
     GENESIS_REQUIRE_API_TOKEN: bool = _bool_env("GENESIS_REQUIRE_API_TOKEN", "0")
-    GENESIS_CORS_ORIGINS: list[str] = _csv_env("GENESIS_CORS_ORIGINS", _default_cors_origins())
-    GENESIS_TRUSTED_HOSTS: list[str] = _csv_env("GENESIS_TRUSTED_HOSTS", _default_trusted_hosts())
+    GENESIS_CORS_ORIGINS: list[str] = _production_safe_csv_env("GENESIS_CORS_ORIGINS", _default_cors_origins())
+    GENESIS_TRUSTED_HOSTS: list[str] = _production_safe_csv_env("GENESIS_TRUSTED_HOSTS", _default_trusted_hosts())
 
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
