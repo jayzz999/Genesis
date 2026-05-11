@@ -14,6 +14,12 @@ descendants, and permission-gated integrations that can touch real systems. The
 product goal is to make autonomous work observable, governable, measurable, and
 capable of improving under real-world feedback.
 
+For a compact implementation checklist, operating contract, and launch criteria,
+see the [Genesis spec sheet](docs/SPEC_SHEET.md).
+
+For reusable development prompts that can be given to an AI coding assistant,
+see [PROMPTS.md](PROMPTS.md).
+
 Most agent frameworks give you a graph of function calls. Genesis gives you a **living entity**:
 
 | Concept | What It Means |
@@ -414,7 +420,7 @@ Genesis supports three providers out of the box:
 |----------|---------|-------|
 | Google Gemini (default) | `GEMINI_API_KEY` | Best quality, used in production |
 | Groq (free tier) | `GROQ_API_KEY` | Great for local dev — fast, free |
-| Development | none | Deterministic no-key mode for local development and tests |
+| Mock | none | Deterministic no-key mode for local development and tests |
 
 Set `GENESIS_LLM_PROVIDER=groq` to switch.
 
@@ -612,7 +618,7 @@ All knobs are set via environment variables. Copy `.env.example` to `.env` and e
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GENESIS_LLM_PROVIDER` | `gemini` | `gemini` or `groq` |
+| `GENESIS_LLM_PROVIDER` | `gemini` | `gemini`, `groq`, or `mock` |
 | `GEMINI_API_KEY` | — | Required when provider is `gemini` |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model name |
 | `GROQ_API_KEY` | — | Required when provider is `groq` |

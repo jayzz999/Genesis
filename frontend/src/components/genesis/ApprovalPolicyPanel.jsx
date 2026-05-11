@@ -143,7 +143,7 @@ export default function ApprovalPolicyPanel({ eventLog }) {
         body: JSON.stringify({
           executed_by: 'policy_gate',
           grant_ttl_minutes: 60,
-          grant_max_uses: 2,
+          grant_max_uses: 10,
           require_confirmation: true,
         }),
       })

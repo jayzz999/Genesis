@@ -142,7 +142,7 @@ export default function PermissionPanel({ eventLog }) {
       const executed = await apiRequest(`/api/genesis/approvals/${approved.approval.id}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ executed_by: 'permission_gate', grant_ttl_minutes: 60, grant_max_uses: 3 }),
+        body: JSON.stringify({ executed_by: 'permission_gate', grant_ttl_minutes: 60, grant_max_uses: 10 }),
       })
       const grant = executed.approval.execution_result.permission_grant
       setActiveGrant(grant)

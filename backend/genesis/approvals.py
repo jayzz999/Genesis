@@ -378,7 +378,7 @@ def issue_grant(
     *,
     issued_by: str = "genesis",
     ttl_minutes: int = 60,
-    max_uses: int = 3,
+    max_uses: int = 10,
     break_glass: dict | None = None,
 ) -> dict:
     now = _now()
@@ -631,7 +631,7 @@ def execute_request(
     *,
     executed_by: str = "genesis",
     grant_ttl_minutes: int = 60,
-    grant_max_uses: int = 3,
+    grant_max_uses: int = 10,
     require_confirmation: bool = False,
 ) -> Optional[dict]:
     request = get_request(approval_id)

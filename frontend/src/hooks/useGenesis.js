@@ -283,7 +283,7 @@ export function useGenesis() {
     return j
   }, [refreshActive, withPending])
 
-  const dream = useCallback(async (id, n = 5) => {
+  const dream = useCallback(async (id, n = 2) => {
     const j = await withPending('dream', () => apiRequest(`/api/genesis/organisms/${id}/dream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

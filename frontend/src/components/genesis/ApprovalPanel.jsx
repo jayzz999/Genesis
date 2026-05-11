@@ -200,7 +200,7 @@ export default function ApprovalPanel({ eventLog }) {
       const data = await apiRequest(`/api/genesis/approvals/${activeApproval.id}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ executed_by: 'genesis_approval_gate' }),
+        body: JSON.stringify({ executed_by: 'genesis_approval_gate', grant_ttl_minutes: 60, grant_max_uses: 10 }),
       })
       setActiveApproval(data.approval)
       setApprovals(prev => prev.map(item => item.id === data.approval.id ? data.approval : item))

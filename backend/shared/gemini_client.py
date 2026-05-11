@@ -125,7 +125,8 @@ async def _groq_generate_text(
         except Exception as e:
             err_str = str(e).lower()
             is_rate_limit = "429" in err_str or "rate_limit" in err_str or "rate limit" in err_str
-            if is_rate_limit and attempt < max_retries:
+            hard_quota = any(token in err_str for token in ("tokens per day", "requests per day", "quota"))
+            if is_rate_limit and not hard_quota and attempt < max_retries:
                 delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
                 logger.warning(
                     f"[Groq] 429 rate-limit on attempt {attempt + 1}/{max_retries + 1}. "
@@ -168,7 +169,8 @@ async def _gemini_generate_text(
                 token in err_str
                 for token in ("429", "rate", "quota", "resource exhausted", "503", "unavailable", "deadline")
             )
-            if retryable and attempt < max_retries:
+            hard_quota = any(token in err_str for token in ("requests per day", "free_tier", "resource exhausted"))
+            if retryable and not hard_quota and attempt < max_retries:
                 delay = base_delay * (2 ** attempt)
                 logger.warning(
                     f"[Gemini] transient provider error on attempt {attempt + 1}/{max_retries + 1}. "

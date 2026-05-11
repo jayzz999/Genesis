@@ -52,7 +52,7 @@ const flavorStyle = (n) => {
 }
 
 function NodeCard({ data }) {
-  const s = flavorStyle(data)
+  const s = flavorStyle(data.raw)
   return (
     <div
       onClick={() => data.onSelect?.(data.raw)}

@@ -79,7 +79,7 @@ async function doAction(name, state, g) {
       })
       return
     case 'dream':
-      if (state.orgId) await g.dream(state.orgId, 5)
+      if (state.orgId) await g.dream(state.orgId, 2)
       return
     case 'edit': {
       if (state.orgId && g.graph?.nodes?.length) {

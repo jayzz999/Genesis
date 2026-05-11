@@ -44,25 +44,104 @@ from .types import Decision, Organism, OrganismState
 logger = logging.getLogger("genesis.runtime")
 
 
+def _one_shot_lifecycle_enabled(org: Organism) -> bool:
+    """Return True when the organism should terminate after declaring completion."""
+    goal = (org.intent.goal or "").lower()
+    for source in org.perception_sources or []:
+        lifecycle = source.get("lifecycle") if isinstance(source, dict) else None
+        if isinstance(lifecycle, dict) and lifecycle.get("mode") in {
+            "one_shot",
+            "terminate_on_done",
+            "die_on_done",
+        }:
+            return True
+
+    # Backward-compatible rule for already-created demo repo maintainers.
+    has_repo_source = any(
+        isinstance(source, dict)
+        and source.get("kind") == "github_repo"
+        and "slack_webhook_message" in set(source.get("write_connectors") or [])
+        for source in org.perception_sources or []
+    )
+    asks_for_slack_suggestion = "suggest" in goal and "slack" in goal
+    continuous_words = ("monitor", "watch", "continuous", "ongoing", "every ")
+    return bool(
+        has_repo_source
+        and asks_for_slack_suggestion
+        and not any(word in goal for word in continuous_words)
+    )
+
+
+def _decision_completes_one_shot(org: Organism, decision: Decision) -> bool:
+    return (
+        not decision.is_dream
+        and not decision.shadow_branch
+        and decision.action.get("name") == "declare_done"
+        and bool(decision.result.get("ok"))
+        and bool(decision.result.get("done"))
+        and _one_shot_lifecycle_enabled(org)
+    )
+
+
 # ── Tool implementations ───────────────────────────────────────────────
 
 async def _tool_send_slack(channel: str, text: str) -> dict:
     import httpx
+    message = str(text or "").strip()
+    if not message:
+        return {"ok": False, "error": "text is required"}
+
     token = os.getenv("SLACK_BOT_TOKEN", "")
-    if not token:
-        return {"ok": False, "skipped": True, "reason": "SLACK_BOT_TOKEN not set"}
-    try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(
-                "https://slack.com/api/chat.postMessage",
-                headers={"Authorization": f"Bearer {token}",
-                         "Content-Type": "application/json; charset=utf-8"},
-                json={"channel": channel, "text": text},
-            )
-            data = r.json()
-            return {"ok": bool(data.get("ok")), "ts": data.get("ts"), "error": data.get("error")}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    if token:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {token}",
+                             "Content-Type": "application/json; charset=utf-8"},
+                    json={"channel": channel, "text": message},
+                )
+                data = r.json()
+                return {
+                    "ok": bool(data.get("ok")),
+                    "transport": "slack_bot",
+                    "ts": data.get("ts"),
+                    "error": data.get("error"),
+                }
+        except Exception as e:
+            return {"ok": False, "transport": "slack_bot", "error": str(e)}
+
+    webhook_url = os.getenv("GENESIS_SLACK_WEBHOOK_URL", "")
+    if webhook_url:
+        from . import connectors
+        if not connectors._is_allowed_url(  # noqa: SLF001 - shared connector allowlist is the runtime policy.
+            webhook_url,
+            allowlist_env="GENESIS_CONNECTOR_WEBHOOK_ALLOWLIST",
+        ):
+            return {
+                "ok": False,
+                "transport": "slack_webhook",
+                "error": "GENESIS_SLACK_WEBHOOK_URL is not in GENESIS_CONNECTOR_WEBHOOK_ALLOWLIST",
+            }
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as c:
+                r = await c.post(webhook_url, json={"text": message})
+            return {
+                "ok": 200 <= r.status_code < 300,
+                "transport": "slack_webhook",
+                "status_code": r.status_code,
+                "response_preview": r.text[:200],
+                "webhook_host": urlparse(webhook_url).hostname,
+                "channel_note": "incoming webhooks use the channel selected during Slack webhook setup",
+            }
+        except Exception as e:
+            return {"ok": False, "transport": "slack_webhook", "error": str(e)}
+
+    return {
+        "ok": False,
+        "skipped": True,
+        "reason": "SLACK_BOT_TOKEN or GENESIS_SLACK_WEBHOOK_URL must be set",
+    }
 
 def _is_public_http_url(url: str) -> tuple[bool, str]:
     parsed = urlparse(str(url or "").strip())
@@ -87,6 +166,27 @@ def _runtime_http_scope(url: str) -> str:
     return url
 
 
+def _find_runtime_http_grant(url: str, *, actor: str) -> str | None:
+    """Return an active grant matching the runtime HTTP scope, if one exists."""
+    from . import approvals
+
+    scope = _runtime_http_scope(url)
+    for grant in approvals.list_grants(status="active", limit=200):
+        if grant.get("action_type") != "external_api":
+            continue
+        if "external_api" not in set(grant.get("permissions") or []):
+            continue
+        grant_scope = grant.get("scope") or "*"
+        if grant_scope not in {"*", scope}:
+            continue
+        approval = approvals.get_request(grant.get("approval_id") or "")
+        requested_by = approval.get("requested_by") if approval else None
+        if requested_by and requested_by != actor:
+            continue
+        return grant.get("id")
+    return None
+
+
 def _validate_runtime_http_grant(url: str, grant_id: str | None, *, consume: bool, actor: str) -> dict:
     ok, reason = _is_public_http_url(url)
     if not ok:
@@ -98,6 +198,8 @@ def _validate_runtime_http_grant(url: str, grant_id: str | None, *, consume: boo
             "blocked": True,
             "reason": "url_not_in_GENESIS_CONNECTOR_HTTP_ALLOWLIST",
         }
+    if not grant_id:
+        grant_id = _find_runtime_http_grant(url, actor=actor)
     if not grant_id:
         request = approvals.create_request(
             title="Runtime HTTP access requested",
@@ -422,6 +524,15 @@ Rules:
   - If the intent is satisfied for this perception, action.name = "declare_done".
   - If you need no action (purely observational), action.name = "noop".
   - Never invent tool names. Only use tools listed in AVAILABLE TOOLS.
+  - RECENT MEMORY may include result_preview. Treat that preview as usable
+    evidence from the prior tool result; do not wait for it to arrive again.
+  - If result_preview.github_file.decoded_text_preview is present, use that
+    text directly. Do NOT try to decode base64 yourself.
+  - Keep action args compact. Do NOT copy large RECENT MEMORY payloads into
+    sandbox_python.input_data. If result_preview already contains enough
+    structure to reason from, summarize it in reasoning and choose remember,
+    send_slack, http_request for the next specific file, or noop.
+  - Return only one complete JSON object. No markdown fences.
 
 CRITICAL — ANTI-REPETITION:
   - BEFORE choosing an action, carefully review RECENT MEMORY.
@@ -433,6 +544,11 @@ CRITICAL — ANTI-REPETITION:
     Each perception cycle should advance to the NEXT step.
   - If you see MCP tools (prefixed mcp__) in AVAILABLE TOOLS, prefer using
     those over forge_mcp_server — the server is already running.
+  - If the organism already has a github_repo perception source, repository
+    monitoring is already configured. Do NOT use forge_mcp_server just to
+    monitor GitHub issues, pull requests, or repository events. Respond to the
+    github_repo perception, remember useful findings, send approved summaries,
+    or noop while waiting for the next source tick.
 """
 
 
@@ -444,6 +560,65 @@ def _build_prompt(
     tool_catalog: list[dict] | None = None,
     long_term_memory: list[dict] | None = None,
 ) -> str:
+    def _result_preview(result: object) -> object:
+        if not isinstance(result, dict):
+            return None
+        preview: dict[str, object] = {}
+        for key in ("ok", "status", "reason", "message", "error"):
+            if key in result:
+                preview[key] = result.get(key)
+
+        body = result.get("body")
+        if isinstance(body, list):
+            items = []
+            for item in body[:30]:
+                if isinstance(item, dict):
+                    items.append({
+                        "name": item.get("name"),
+                        "path": item.get("path"),
+                        "type": item.get("type"),
+                        "size": item.get("size"),
+                    })
+                else:
+                    items.append(str(item)[:160])
+            preview["body_items"] = items
+            preview["body_count"] = len(body)
+        elif isinstance(body, dict):
+            preview["body_keys"] = list(body.keys())[:30]
+            if body.get("encoding") == "base64" and isinstance(body.get("content"), str):
+                try:
+                    import base64
+
+                    raw = "".join(str(body.get("content") or "").split())
+                    decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
+                    preview["github_file"] = {
+                        "name": body.get("name"),
+                        "path": body.get("path"),
+                        "size": body.get("size"),
+                        "encoding": body.get("encoding"),
+                        "decoded_text_preview": decoded[:4000],
+                        "decoded_text_truncated": len(decoded) > 4000,
+                    }
+                except Exception as exc:
+                    preview["github_file_decode_error"] = str(exc)[:200]
+            preview["body_excerpt"] = {
+                str(k): str(body[k])[:1200]
+                for k in list(body.keys())[:10]
+                if k != "content" and isinstance(body.get(k), (str, int, float, bool, type(None)))
+            }
+        elif body is not None:
+            preview["body_excerpt"] = str(body)[:1200]
+
+        grant = result.get("grant")
+        if isinstance(grant, dict):
+            preview["grant"] = {
+                "id": grant.get("id"),
+                "scope": grant.get("scope"),
+                "uses": grant.get("uses"),
+                "max_uses": grant.get("max_uses"),
+            }
+        return preview or None
+
     def _decision_brief(d: Decision) -> dict:
         return {
             "id": d.id,
@@ -451,6 +626,7 @@ def _build_prompt(
             "trigger": d.trigger,
             "action": d.action,
             "result_ok": d.result.get("ok") if isinstance(d.result, dict) else None,
+            "result_preview": _result_preview(d.result),
             "reasoning": d.reasoning[:300],
             "is_dream": d.is_dream,
         }
@@ -475,11 +651,33 @@ def _build_prompt(
         tools_doc = {name: desc for name, (_, desc) in TOOLS.items()}
         tools_doc["noop"] = "Take no action. Args: {}."
 
+    active_grants = []
+    try:
+        from . import approvals
+
+        for grant in approvals.list_grants(status="active", limit=200):
+            approval = approvals.get_request(grant.get("approval_id") or "")
+            if approval and approval.get("requested_by") != org.id:
+                continue
+            active_grants.append({
+                "id": grant.get("id"),
+                "action_type": grant.get("action_type"),
+                "scope": grant.get("scope"),
+                "permissions": grant.get("permissions") or [],
+                "uses": grant.get("uses", 0),
+                "max_uses": grant.get("max_uses"),
+                "expires_at": grant.get("expires_at"),
+            })
+    except Exception:
+        active_grants = []
+
     parts = {
         "INTENT": org.intent.goal,
         "CONSTRAINTS": org.intent.constraints,
         "FORBIDDEN": org.intent.forbidden,
         "SUCCESS_SIGNALS": org.intent.success_signals,
+        "PERCEPTION_SOURCES": org.perception_sources,
+        "ACTIVE_PERMISSION_GRANTS": active_grants,
         "LEARNED_PATTERNS": org.learned_patterns,
         "LONG_TERM_MEMORY": long_term_memory or [],
         "RECENT_MEMORY": [_decision_brief(d) for d in recent_memory],
@@ -488,6 +686,22 @@ def _build_prompt(
         "AVAILABLE_TOOLS": tools_doc,
     }
     return json.dumps(parts, indent=2, default=str)
+
+
+def _has_github_repo_source(org: Organism) -> bool:
+    return any(src.get("kind") == "github_repo" for src in (org.perception_sources or []))
+
+
+def _github_monitoring_already_configured(ctx) -> bool:
+    if not ctx.organism:
+        return False
+    if str(ctx.perception.get("source") or "") == "github_repo":
+        return True
+    goal = ctx.organism.intent.goal.lower()
+    return _has_github_repo_source(ctx.organism) and any(
+        term in goal
+        for term in ("github", "repository", "repo", "pull request", "issue")
+    )
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -584,10 +798,28 @@ async def _reason_with_llm(ctx) -> str:
         system=strategy_system,
         model=org.reasoning_model,
         temperature=0.4 if ctx.is_dream else 0.1,
-        max_tokens=2000,
+        max_tokens=3500,
     )
 
     parsed = _parse_llm_json(raw)
+    if (
+        not raw.lstrip().startswith("{")
+        and (parsed.get("action") or {}).get("name") == "noop"
+        and not parsed.get("alternatives")
+    ):
+        raw = await generate_text(
+            prompt=(
+                "Convert this organism reasoning into one valid compact JSON object "
+                "with keys reasoning, action, alternatives. Use only tools from the "
+                "original AVAILABLE_TOOLS. Do not add markdown fences.\n\n"
+                f"ORIGINAL RESPONSE:\n{raw[:5000]}"
+            ),
+            system=strategy_system,
+            model=org.reasoning_model,
+            temperature=0,
+            max_tokens=1200,
+        )
+        parsed = _parse_llm_json(raw)
     reasoning = str(parsed.get("reasoning", ""))[:4000]
     action = parsed.get("action") or {"name": "noop", "args": {}}
     action_name = str(action.get("name", "noop"))
@@ -637,8 +869,26 @@ async def _execute_action(ctx) -> Decision:
     action_name = str(action.get("name", "noop"))
     action_args = action.get("args") or {}
 
+    if action_name == "forge_mcp_server" and _github_monitoring_already_configured(ctx):
+        reasoning = (
+            reasoning
+            + "\n\nSafety correction: GitHub repository monitoring is already configured "
+            "through the organism's github_repo perception source, so creating a new MCP "
+            "server for basic repository monitoring would be unnecessary."
+        )[:4000]
+        action_name = "noop"
+        action_args = {"reason": "github_repo_source_already_monitors_repository"}
+        alternatives = [
+            {
+                "name": "forge_mcp_server",
+                "args": action.get("args", {}),
+                "why_not": "A github_repo perception source already provides repository monitoring.",
+            },
+            *alternatives[:1],
+        ]
+
     # MCP tool dispatch — early return before built-in tool execution
-    tool_name = ctx.parsed.get("action", {}).get("name", "")
+    tool_name = action_name
     if tool_name.startswith("mcp__"):
         if ctx.is_dream:
             result = await _synthesize_dream_result(ctx, tool_name)
@@ -707,8 +957,18 @@ async def _persist_and_emit(ctx) -> None:
         org = store.load_organism(org.id) or org
         
         action_name = decision.action.get("name", "noop")
-        if action_name == "declare_done":
-            org.state = OrganismState.PERCEIVING
+        completed_one_shot = _decision_completes_one_shot(org, decision)
+        new_skill_id = None
+        if completed_one_shot:
+            try:
+                from .skills import distill as _distill
+
+                new_skill_id = await _distill.distill(org.id)
+                org = store.load_organism(org.id) or org
+            except Exception as e:
+                logger.warning("distillation failed for completed organism %s: %s", org.id, e)
+            org.state = OrganismState.DEAD
+            org.perception_sources = []
         else:
             org.state = OrganismState.PERCEIVING
         store.save_organism(org)
@@ -718,6 +978,19 @@ async def _persist_and_emit(ctx) -> None:
                 "organism_id": ctx.organism_id,
                 "decision": decision.model_dump(mode="json"),
             })
+            if completed_one_shot:
+                await ctx.event_callback("organism.died", {
+                    "organism_id": ctx.organism_id,
+                    "reason": "intent_complete",
+                    "summary": decision.result.get("summary", ""),
+                    "patterns_donated": org.learned_patterns,
+                    "distilled_skill_id": new_skill_id or org.distilled_skill_id,
+                })
+                if new_skill_id:
+                    await ctx.event_callback("organism.distilled", {
+                        "organism_id": ctx.organism_id,
+                        "skill_id": new_skill_id,
+                    })
 
         if action_name == "remember":
             pattern = decision.action.get("args", {}).get("pattern", "")

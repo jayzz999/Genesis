@@ -128,7 +128,7 @@ export default function ApprovalGovernancePanel({ eventLog }) {
         body: JSON.stringify({
           executed_by: 'governance_gate',
           grant_ttl_minutes: 30,
-          grant_max_uses: 2,
+          grant_max_uses: 10,
         }),
       })
       setApproval(data.approval)

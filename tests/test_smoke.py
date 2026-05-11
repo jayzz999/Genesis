@@ -55,6 +55,344 @@ async def test_seed_status_and_perceive_work_without_api_keys(isolated_genesis):
 
 
 @pytest.mark.asyncio
+async def test_seed_adds_autonomous_interval_source_by_default(isolated_genesis):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        seed_response = await client.post(
+            "/api/genesis/seed",
+            json={"name": "planner", "goal": "Track a project goal without manual pokes."},
+        )
+        assert seed_response.status_code == 200
+        source = seed_response.json()["organism"]["perception_sources"][0]
+        assert source["kind"] == "interval"
+        assert source["type"] == "autonomous_goal_check"
+        assert source["interval_s"] >= 60
+
+
+@pytest.mark.asyncio
+async def test_seed_adds_github_repo_source_for_repo_goals(isolated_genesis, monkeypatch):
+    monkeypatch.setenv("GENESIS_GITHUB_REPOSITORIES", "owner/repo")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        seed_response = await client.post(
+            "/api/genesis/seed",
+            json={
+                "name": "github repo check",
+                "goal": "Check GitHub repo and identify improvements.",
+            },
+        )
+        assert seed_response.status_code == 200
+        source = seed_response.json()["organism"]["perception_sources"][0]
+        assert source["kind"] == "github_repo"
+        assert source["type"] == "repo_maintainer_signal"
+        assert source["repo"] == "owner/repo"
+        assert source["interval_s"] == 1
+        assert source["requires_approval"] is True
+
+
+@pytest.mark.asyncio
+async def test_seed_infers_explicit_github_repo_from_goal(isolated_genesis, monkeypatch):
+    monkeypatch.setenv("GENESIS_GITHUB_REPOSITORIES", "fallback/repo")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        seed_response = await client.post(
+            "/api/genesis/seed",
+            json={
+                "name": "academic monitor",
+                "goal": "Monitor jayzz999/Academic-Research-Agent for issues and pull requests.",
+            },
+        )
+        assert seed_response.status_code == 200
+        source = seed_response.json()["organism"]["perception_sources"][0]
+        assert source["kind"] == "github_repo"
+        assert source["repo"] == "jayzz999/Academic-Research-Agent"
+
+
+@pytest.mark.asyncio
+async def test_github_repo_source_fires_as_perception(isolated_genesis, monkeypatch):
+    from backend.genesis import lifecycle, runtime
+
+    seen = {}
+
+    def fake_probe_adapter(**kwargs):
+        return {"status": "pass", "details": {"repo": kwargs["scope"]}}
+
+    async def fake_perceive(organism_id, perception, event_callback=None, **kwargs):
+        seen["organism_id"] = organism_id
+        seen["perception"] = perception
+
+    monkeypatch.setattr(lifecycle.connectors, "probe_adapter", fake_probe_adapter)
+    monkeypatch.setattr(runtime, "perceive", fake_perceive)
+
+    await lifecycle._fire_github_repo(
+        "o_test",
+        {
+            "kind": "github_repo",
+            "type": "repo_maintainer_signal",
+            "repo": "owner/repo",
+            "payload": {"instruction": "check repo"},
+        },
+    )
+
+    assert seen["organism_id"] == "o_test"
+    assert seen["perception"]["source"] == "github_repo"
+    assert seen["perception"]["payload"]["probe"]["status"] == "pass"
+    assert seen["perception"]["payload"]["requires_approval"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_github_repo_source_preserves_repo_metadata(isolated_genesis):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        organism = (
+            await client.post(
+                "/api/genesis/seed",
+                json={"name": "repo watcher", "goal": "Watch GitHub repository signals."},
+            )
+        ).json()["organism"]
+
+        response = await client.post(
+            f"/api/genesis/organisms/{organism['id']}/sources",
+            json={
+                "kind": "github_repo",
+                "type": "repo_maintainer_signal",
+                "repo": "owner/repo",
+                "read_probe": "github_create_issue",
+                "write_connectors": ["github_create_issue", "github_issue_comment"],
+                "requires_approval": True,
+                "no_fake_activity": True,
+            },
+        )
+        assert response.status_code == 200
+        source = response.json()["sources"][-1]
+        assert source["repo"] == "owner/repo"
+        assert source["write_connectors"] == ["github_create_issue", "github_issue_comment"]
+        assert source["requires_approval"] is True
+
+
+@pytest.mark.asyncio
+async def test_autonomous_perception_records_quota_fallback(isolated_genesis, monkeypatch):
+    from backend.genesis import runtime
+
+    organism = runtime.seed(
+        intent_goal="Watch repository signals even when provider quota is exhausted.",
+        name="quota fallback",
+    )
+
+    async def fail_with_quota(ctx):
+        raise RuntimeError("429 rate_limit_exceeded tokens per day")
+
+    monkeypatch.setattr(runtime, "_reason_with_llm", fail_with_quota)
+
+    decision = await runtime.perceive(
+        organism.id,
+        {"type": "repo_maintainer_signal", "source": "github_repo", "payload": {"repo": "owner/repo"}},
+    )
+
+    assert decision.action["name"] == "noop"
+    assert decision.result["provider_quota"] is True
+    assert store.load_organism(organism.id).state == "perceiving"
+    assert store.load_decisions(organism.id)[0].id == decision.id
+
+
+@pytest.mark.asyncio
+async def test_manual_perception_records_quota_fallback(isolated_genesis, monkeypatch):
+    from backend.genesis import runtime
+
+    organism = runtime.seed(
+        intent_goal="Handle manual perceptions even when provider quota is exhausted.",
+        name="manual quota fallback",
+    )
+
+    async def fail_with_quota(ctx):
+        raise RuntimeError("429 rate_limit_exceeded tokens per day")
+
+    monkeypatch.setattr(runtime, "_reason_with_llm", fail_with_quota)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/genesis/organisms/{organism.id}/perceive",
+            json={"perception": {"type": "manual_check", "payload": {"ok": True}}},
+        )
+
+    assert response.status_code == 200
+    decision = response.json()["decision"]
+    assert decision["action"]["name"] == "noop"
+    assert decision["result"]["provider_quota"] is True
+
+
+@pytest.mark.asyncio
+async def test_send_slack_uses_configured_webhook_without_bot_token(isolated_genesis, monkeypatch):
+    from backend.genesis import runtime
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0") or "0"))
+            received["body"] = body.decode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *_args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("GENESIS_SLACK_WEBHOOK_URL", f"http://127.0.0.1:{server.server_port}/slack")
+        monkeypatch.setenv("GENESIS_CONNECTOR_WEBHOOK_ALLOWLIST", "127.0.0.1")
+
+        result = await runtime._tool_send_slack("#general", "hello from test")
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+    assert result["ok"] is True
+    assert result["transport"] == "slack_webhook"
+    assert "hello from test" in received["body"]
+
+
+@pytest.mark.asyncio
+async def test_github_repo_monitor_does_not_forge_mcp_server_when_source_exists(isolated_genesis, monkeypatch):
+    from backend.genesis import runtime
+
+    organism = runtime.seed(
+        intent_goal="Monitor jayzz999/Academic-Research-Agent for issues and pull requests.",
+        name="academic monitor",
+    )
+    organism.perception_sources.append(
+        {
+            "kind": "github_repo",
+            "type": "repo_maintainer_signal",
+            "repo": "jayzz999/Academic-Research-Agent",
+        }
+    )
+    store.save_organism(organism)
+
+    async def choose_bad_tool(ctx):
+        return """
+        {
+          "reasoning": "I should create a GitHub monitor server.",
+          "action": {
+            "name": "forge_mcp_server",
+            "args": {"name": "GitHubMonitor", "description": "Monitor GitHub events."}
+          },
+          "alternatives": []
+        }
+        """
+
+    monkeypatch.setattr(runtime, "_reason_with_llm", choose_bad_tool)
+
+    decision = await runtime.perceive(
+        organism.id,
+        {
+            "type": "repo_maintainer_signal",
+            "source": "github_repo",
+            "repo": "jayzz999/Academic-Research-Agent",
+            "payload": {"probe": {"status": "pass"}},
+        },
+    )
+
+    assert decision.action["name"] == "noop"
+    assert decision.action["args"]["reason"] == "github_repo_source_already_monitors_repository"
+    assert "Safety correction" in decision.reasoning
+
+
+@pytest.mark.asyncio
+async def test_one_shot_repo_maintainer_dies_after_declare_done(isolated_genesis, monkeypatch):
+    from backend.genesis import runtime
+
+    organism = runtime.seed(
+        intent_goal=(
+            "Read the configured GitHub repository, identify practical ways to "
+            "improve the project, and suggest findings in Slack."
+        ),
+        name="Governed repo maintainer",
+    )
+    organism.perception_sources.append(
+        {
+            "kind": "github_repo",
+            "type": "repo_maintainer_signal",
+            "repo": "owner/repo",
+            "write_connectors": ["slack_webhook_message"],
+            "lifecycle": {"mode": "one_shot", "terminate_on": "declare_done"},
+        }
+    )
+    store.save_organism(organism)
+
+    async def declare_done(ctx):
+        return """
+        {
+          "reasoning": "The repo was read and the Slack suggestion was sent.",
+          "action": {"name": "declare_done", "args": {"summary": "Slack suggestion delivered."}},
+          "alternatives": [{"name": "noop", "args": {}, "why_not": "The intent is already complete."}]
+        }
+        """
+
+    monkeypatch.setattr(runtime, "_reason_with_llm", declare_done)
+
+    async def fake_distill(organism_id):
+        org = store.load_organism(organism_id)
+        org.distilled_skill_id = "sk_auto_demo"
+        store.save_organism(org)
+        return "sk_auto_demo"
+
+    monkeypatch.setattr("backend.genesis.skills.distill.distill", fake_distill)
+
+    decision = await runtime.perceive(
+        organism.id,
+        {"type": "repo_maintainer_signal", "source": "github_repo", "payload": {"repo": "owner/repo"}},
+    )
+
+    updated = store.load_organism(organism.id)
+    assert decision.action["name"] == "declare_done"
+    assert decision.result["done"] is True
+    assert updated.state == "dead"
+    assert updated.perception_sources == []
+    assert updated.distilled_skill_id == "sk_auto_demo"
+
+
+@pytest.mark.asyncio
+async def test_regular_organism_stays_perceiving_after_declare_done(isolated_genesis, monkeypatch):
+    from backend.genesis import runtime
+
+    organism = runtime.seed(
+        intent_goal="Handle each periodic status check.",
+        name="periodic",
+    )
+    organism.perception_sources.append(
+        {"kind": "interval", "type": "status_check", "interval_s": 300}
+    )
+    store.save_organism(organism)
+
+    async def declare_done(ctx):
+        return """
+        {
+          "reasoning": "This individual status check is complete.",
+          "action": {"name": "declare_done", "args": {"summary": "Tick complete."}},
+          "alternatives": [{"name": "noop", "args": {}, "why_not": "declare_done records completion."}]
+        }
+        """
+
+    monkeypatch.setattr(runtime, "_reason_with_llm", declare_done)
+
+    await runtime.perceive(
+        organism.id,
+        {"type": "status_check", "source": "interval", "payload": {}},
+    )
+
+    assert store.load_organism(organism.id).state == "perceiving"
+
+
+@pytest.mark.asyncio
 async def test_mutating_routes_can_require_api_token(isolated_genesis, monkeypatch):
     monkeypatch.setattr(settings, "GENESIS_REQUIRE_API_TOKEN", True)
     monkeypatch.setattr(settings, "GENESIS_API_TOKEN", "test-token-that-is-long-enough")
@@ -216,7 +554,11 @@ async def test_webhook_source_gets_token_and_accepts_delivery(isolated_genesis):
 
         await lifecycle._reconcile()
         updated = store.load_organism(organism["id"])
-        token = updated.perception_sources[0]["token"]
+        token = next(
+            src["token"]
+            for src in updated.perception_sources
+            if src.get("kind") == "webhook"
+        )
 
         delivery_response = await client.post(
             f"/api/genesis/webhook/{token}",
@@ -886,6 +1228,7 @@ async def test_agi7_human_approval_permission_layer(isolated_genesis, monkeypatc
     executed = approvals.execute_request(request["id"], executed_by="gate")
     assert executed["status"] == "executed"
     assert executed["execution_result"]["simulated"] is True
+    assert executed["execution_result"]["permission_grant"]["max_uses"] == 10
 
     rejected = approvals.create_request(
         title="Reject destructive action",

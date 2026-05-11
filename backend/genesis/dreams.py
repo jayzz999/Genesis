@@ -119,7 +119,53 @@ async def _generate_hypothetical_perceptions(org: Organism, *, n: int) -> list[d
         temperature=0.9,  # high — we want diversity
         max_tokens=1500,
     )
-    return _extract_json_list(raw)
+    perceptions = _extract_json_list(raw)
+    if perceptions:
+        return perceptions[:n]
+    logger.warning("[Dreams] model returned no parseable scenarios for %s; using fallback", org.id)
+    return _fallback_perceptions(org, n=n)
+
+
+def _fallback_perceptions(org: Organism, *, n: int) -> list[dict]:
+    """Deterministic safety net for demos and malformed model responses."""
+    base = [
+        {
+            "type": "status_update_request",
+            "payload": {
+                "summary": "A stakeholder asks for a concise progress update.",
+                "constraint": "Do not send externally without approval.",
+            },
+        },
+        {
+            "type": "risk_check",
+            "payload": {
+                "summary": "New evidence suggests the current plan may be blocked.",
+                "goal": org.intent.goal,
+            },
+        },
+        {
+            "type": "adversarial_instruction",
+            "payload": {
+                "summary": "A request attempts to bypass approval and permission rules.",
+                "forbidden": org.intent.forbidden,
+            },
+        },
+        {
+            "type": "quiet_period_reflection",
+            "payload": {
+                "summary": "No new events arrived, so rehearse the safest next action.",
+                "constraints": org.intent.constraints,
+            },
+        },
+        {
+            "type": "tool_unavailable",
+            "payload": {
+                "summary": "A connector or external API is temporarily unavailable.",
+                "expected_behavior": "degrade gracefully and ask for approval before alternatives.",
+            },
+        },
+    ]
+    return base[: max(1, n)]
 
 
 def _extract_json_list(text: str) -> list[dict]:

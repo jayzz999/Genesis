@@ -392,12 +392,12 @@ export default function GenesisPage() {
                 >{pendingActions.perceive ? 'Perceiving...' : '👁 Perceive'}</button>
                 <button
                   onClick={async () => {
-                    try { await dream(activeId, 5) }
+                    try { await dream(activeId, 2) }
                     catch (e) { setPerceiveError(e.message || 'Dream failed') }
                   }}
                   disabled={organismBusy}
                   className="flex-1 px-2 py-1.5 rounded bg-fuchsia-500/20 hover:bg-fuchsia-500/40 border border-fuchsia-400/40 text-fuchsia-200 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
-                >{pendingActions.dream ? 'Dreaming...' : '💭 Dream ×5'}</button>
+                >{pendingActions.dream ? 'Dreaming...' : '💭 Dream ×2'}</button>
               </div>
             </div>
           )}
@@ -1076,7 +1076,7 @@ function SeedModal({ onClose, onSeed, skills, prefillSkillId, busy }) {
 
   const applyTemplate = (t) => {
     setTemplate(t.id)
-    setName(t.id === 'blank' ? '' : t.id)
+    setName(t.id === 'blank' ? '' : (t.seedName || t.name))
     setGoal(t.goal)
     setConstraintsText((t.constraints || []).join('\n'))
     setForbiddenText((t.forbidden || []).join('\n'))
@@ -1206,11 +1206,12 @@ function SourceRail({ organism, onAdd, onRemove, busy }) {
         {sources.map((s, i) => (
           <div key={i} className="flex items-center gap-2 px-2 py-1 rounded bg-forge-border/30 text-[11px] group">
             <span className="text-cyan-300">
-              {s.kind === 'interval' ? '⏱' : s.kind === 'http_poll' ? '🌐' : '📬'}
+              {s.kind === 'interval' ? '⏱' : s.kind === 'http_poll' ? '🌐' : s.kind === 'github_repo' ? '👁' : '📬'}
             </span>
             <div className="flex-1 min-w-0">
               <div className="font-medium truncate">{s.type || s.kind}</div>
               <div className="text-[10px] text-forge-muted truncate">
+                {s.kind === 'github_repo' && `${s.repo || 'configured repo'} · every ${s.interval_s || 1}s · approval gated`}
                 {s.kind === 'http_poll' && s.url}
                 {s.kind === 'webhook' && s.token && `POST /api/genesis/webhook/${s.token}`}
                 {s.kind === 'interval' && `every ${s.interval_s}s`}

@@ -24,6 +24,8 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
+import re
 import secrets
 import shutil
 from pathlib import Path
@@ -98,6 +100,71 @@ class PerceptionSourceRequest(BaseModel):
     method: str | None = "GET"
     headers: dict | None = None
     payload: dict | None = None
+    repo: str | None = None
+    read_probe: str | None = None
+    write_connectors: list[str] | None = None
+    requires_approval: bool | None = None
+    no_fake_activity: bool | None = None
+
+
+def _first_github_repo() -> str:
+    configured = os.getenv("GENESIS_DEFAULT_GITHUB_REPO") or os.getenv("GENESIS_GITHUB_REPOSITORIES", "")
+    for item in configured.split(","):
+        repo = item.strip()
+        if repo and repo != "*":
+            return repo
+    return "jayzz999/Genesis"
+
+
+def _repo_from_seed_text(req: SeedRequest) -> str:
+    text = " ".join([req.name or "", req.goal or "", " ".join(req.success_signals or [])])
+    match = re.search(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b", text)
+    if match:
+        return match.group(1)
+    return _first_github_repo()
+
+
+def _default_perception_sources(req: SeedRequest) -> list[dict[str, Any]]:
+    """Give seeded organisms a real autonomous input stream by default."""
+    if os.getenv("GENESIS_AUTO_SOURCE_ON_SEED", "1").lower() in {"0", "false", "no"}:
+        return []
+
+    text = " ".join([req.name or "", req.goal or "", " ".join(req.success_signals or [])]).lower()
+    githubish = any(term in text for term in ("github", "repository", " repo ", "pull request", "issue"))
+    if githubish:
+        return [
+            {
+                "kind": "github_repo",
+                "type": "repo_maintainer_signal",
+                "repo": _repo_from_seed_text(req),
+                "interval_s": int(os.getenv("GENESIS_GITHUB_SOURCE_INTERVAL_S", "1")),
+                "read_probe": "github_create_issue",
+                "write_connectors": ["slack_webhook_message"],
+                "requires_approval": True,
+                "no_fake_activity": True,
+                "lifecycle": {
+                    "mode": "one_shot",
+                    "terminate_on": "declare_done",
+                    "reason": "Repo improvement demo should stop after the approved Slack suggestion is delivered.",
+                },
+                "payload": {
+                    "instruction": req.goal,
+                    "external_actions_require_approval": True,
+                },
+            }
+        ]
+
+    return [
+        {
+            "kind": "interval",
+            "type": "autonomous_goal_check",
+            "interval_s": int(os.getenv("GENESIS_DEFAULT_SOURCE_INTERVAL_S", "300")),
+            "payload": {
+                "instruction": req.goal,
+                "external_actions_require_approval": True,
+            },
+        }
+    ]
 
 
 # ── Routes ─────────────────────────────────────────────────────────────
@@ -124,6 +191,8 @@ async def seed(req: SeedRequest):
     org.inherited_skills = inherited_refs
     org.parent_organisms = parent_orgs
     org.mcp_servers = mcp_specs
+    if not org.perception_sources:
+        org.perception_sources.extend(_default_perception_sources(req))
 
     # Phase 5A: seed default reasoning strategies
     metacognition.seed_default_strategies(org)
@@ -221,6 +290,13 @@ async def kill_organism(organism_id: str):
     base = Path(store._BASE) / organism_id  # noqa: SLF001
     if base.exists():
         shutil.rmtree(base)
+    try:
+        long_term.delete_organism_mirror(organism_id)
+    except Exception as e:
+        import logging
+        logging.getLogger("genesis.api").warning(
+            f"long-term mirror cleanup failed for {organism_id}: {e}"
+        )
     await events.emit("organism.died", {
         "organism_id": organism_id,
         "patterns_donated": org.learned_patterns,
@@ -807,7 +883,7 @@ class ApprovalDecisionRequest(BaseModel):
 class ApprovalExecuteRequest(BaseModel):
     executed_by: str = "genesis"
     grant_ttl_minutes: int = Field(60, ge=1, le=10080)
-    grant_max_uses: int = Field(3, ge=1, le=1000)
+    grant_max_uses: int = Field(10, ge=1, le=1000)
     require_confirmation: bool = False
 
 
@@ -1279,6 +1355,25 @@ async def execute_approval(approval_id: str, req: ApprovalExecuteRequest):
     grant = (request.get("execution_result") or {}).get("permission_grant")
     if grant:
         await events.emit("permission.granted", {"grant": grant, "approval_id": approval_id})
+    organism_id = request.get("requested_by")
+    if organism_id and request.get("source") == "runtime_tool" and store.load_organism(organism_id):
+        await runtime.perceive(
+            organism_id,
+            {
+                "type": "approval_executed",
+                "source": "approval_gate",
+                "approval_id": approval_id,
+                "grant_id": grant.get("id") if grant else None,
+                "action_type": request.get("action_type"),
+                "scope": (request.get("payload") or {}).get("scope"),
+                "url": (request.get("payload") or {}).get("url"),
+                "instruction": (
+                    "A previously blocked runtime action now has an active permission grant. "
+                    "Retry the blocked action using this grant if it still advances the current intent."
+                ),
+            },
+            event_callback=events.make_callback(),
+        )
     return {"approval": request}
 
 

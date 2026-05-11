@@ -520,6 +520,13 @@ def list_decision_payloads(organism_id: str) -> list[dict]:
     return [_json_payload(_as_dict(row).get("payload_json")) for row in rows]
 
 
+def delete_organism_mirror(organism_id: str) -> None:
+    conn = _connect()
+    conn.execute(_sql("DELETE FROM decision_records WHERE organism_id = ?"), (organism_id,))
+    conn.execute(_sql("DELETE FROM organism_records WHERE id = ?"), (organism_id,))
+    conn.commit()
+
+
 def write_audit(actor: str, action: str, target: str, status: str, payload: dict | None = None) -> dict:
     event = {
         "id": "aud_" + secrets.token_hex(8),
