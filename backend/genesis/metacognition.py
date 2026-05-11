@@ -1,6 +1,6 @@
 """Phase 5A — Meta-Cognitive Critic: the organism evaluates its own reasoning.
 
-This is the core AGI-adjacent capability. After each real Decision, a critic
+This is the core autonomy-adjacent capability. After each real Decision, a critic
 pass asks: 'Was my reasoning good? How should I reason differently next time?'
 
 The critic maintains a Reasoning Strategy Library — a set of named approaches
@@ -263,6 +263,13 @@ async def critique(
     # Persist the meta-decision
     store.save_meta_decision(meta_decision)
 
+    try:
+        from . import memory
+        memory_item = memory.write_from_meta(org, decision, meta_decision)
+    except Exception as e:
+        logger.warning(f"[metacognition] memory write failed for {organism_id}: {e}")
+        memory_item = None
+
     # Phase 5E: Accumulate knowledge gaps
     new_gaps = list(parsed.get("knowledge_gaps", []))
     if new_gaps:
@@ -284,6 +291,11 @@ async def critique(
             "recommended_strategy": meta_decision.recommended_strategy,
             "repeated_mistake": meta_decision.repeated_mistake,
         })
+        if memory_item:
+            await event_callback("memory.created", {
+                "organism_id": organism_id,
+                "memory": memory_item.model_dump(mode="json"),
+            })
 
     logger.info(
         f"[metacognition] {organism_id} critique: "

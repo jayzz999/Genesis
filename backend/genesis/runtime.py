@@ -11,11 +11,15 @@ ACTION TOOLS the runtime exposes to the LLM:
   - send_slack(channel, text)        — talk to Slack
   - send_email(to, subject, body)    — talk via Gmail
   - sheet_append(values)             — write to Google Sheets
-  - http_request(method, url, ...)   — talk to any API
+  - http_request(method, url, grant_id, ...) — permission-gated API access
+  - fetch_web_page(url, grant_id)    — permission-gated web read
+  - forge_mcp_server(..., grant_id)  — permission-gated capability creation
   - remember(pattern)                — promote insight to learned_patterns
   - declare_done()                   — signal intent has been satisfied
 
-These are intentionally a small fixed set. The runtime is the *body* — it
+These are intentionally a small fixed set. Risky runtime tools share the
+connector approval/grant model before they touch the network or write executable
+capabilities. The runtime is the *body* — it
 manifests the LLM's choices into the world. The organism reasons; the
 runtime acts.
 """
@@ -23,9 +27,12 @@ runtime acts.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
@@ -37,36 +44,273 @@ from .types import Decision, Organism, OrganismState
 logger = logging.getLogger("genesis.runtime")
 
 
+def _one_shot_lifecycle_enabled(org: Organism) -> bool:
+    """Return True when the organism should terminate after declaring completion."""
+    goal = (org.intent.goal or "").lower()
+    for source in org.perception_sources or []:
+        lifecycle = source.get("lifecycle") if isinstance(source, dict) else None
+        if isinstance(lifecycle, dict) and lifecycle.get("mode") in {
+            "one_shot",
+            "terminate_on_done",
+            "die_on_done",
+        }:
+            return True
+
+    # Backward-compatible rule for already-created demo repo maintainers.
+    has_repo_source = any(
+        isinstance(source, dict)
+        and source.get("kind") == "github_repo"
+        and "slack_webhook_message" in set(source.get("write_connectors") or [])
+        for source in org.perception_sources or []
+    )
+    asks_for_slack_suggestion = "suggest" in goal and "slack" in goal
+    continuous_words = ("monitor", "watch", "continuous", "ongoing", "every ")
+    return bool(
+        has_repo_source
+        and asks_for_slack_suggestion
+        and not any(word in goal for word in continuous_words)
+    )
+
+
+def _decision_completes_one_shot(org: Organism, decision: Decision) -> bool:
+    return (
+        not decision.is_dream
+        and not decision.shadow_branch
+        and decision.action.get("name") == "declare_done"
+        and bool(decision.result.get("ok"))
+        and bool(decision.result.get("done"))
+        and _one_shot_lifecycle_enabled(org)
+    )
+
+
 # ── Tool implementations ───────────────────────────────────────────────
 
 async def _tool_send_slack(channel: str, text: str) -> dict:
     import httpx
+    message = str(text or "").strip()
+    if not message:
+        return {"ok": False, "error": "text is required"}
+
     token = os.getenv("SLACK_BOT_TOKEN", "")
-    if not token:
-        return {"ok": False, "skipped": True, "reason": "SLACK_BOT_TOKEN not set"}
+    if token:
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {token}",
+                             "Content-Type": "application/json; charset=utf-8"},
+                    json={"channel": channel, "text": message},
+                )
+                data = r.json()
+                return {
+                    "ok": bool(data.get("ok")),
+                    "transport": "slack_bot",
+                    "ts": data.get("ts"),
+                    "error": data.get("error"),
+                }
+        except Exception as e:
+            return {"ok": False, "transport": "slack_bot", "error": str(e)}
+
+    webhook_url = os.getenv("GENESIS_SLACK_WEBHOOK_URL", "")
+    if webhook_url:
+        from . import connectors
+        if not connectors._is_allowed_url(  # noqa: SLF001 - shared connector allowlist is the runtime policy.
+            webhook_url,
+            allowlist_env="GENESIS_CONNECTOR_WEBHOOK_ALLOWLIST",
+        ):
+            return {
+                "ok": False,
+                "transport": "slack_webhook",
+                "error": "GENESIS_SLACK_WEBHOOK_URL is not in GENESIS_CONNECTOR_WEBHOOK_ALLOWLIST",
+            }
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as c:
+                r = await c.post(webhook_url, json={"text": message})
+            return {
+                "ok": 200 <= r.status_code < 300,
+                "transport": "slack_webhook",
+                "status_code": r.status_code,
+                "response_preview": r.text[:200],
+                "webhook_host": urlparse(webhook_url).hostname,
+                "channel_note": "incoming webhooks use the channel selected during Slack webhook setup",
+            }
+        except Exception as e:
+            return {"ok": False, "transport": "slack_webhook", "error": str(e)}
+
+    return {
+        "ok": False,
+        "skipped": True,
+        "reason": "SLACK_BOT_TOKEN or GENESIS_SLACK_WEBHOOK_URL must be set",
+    }
+
+def _is_public_http_url(url: str) -> tuple[bool, str]:
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "url_must_be_http_or_https"
+    host = parsed.hostname.strip().lower()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        return False, "localhost_is_blocked"
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(
-                "https://slack.com/api/chat.postMessage",
-                headers={"Authorization": f"Bearer {token}",
-                         "Content-Type": "application/json; charset=utf-8"},
-                json={"channel": channel, "text": text},
-            )
-            data = r.json()
-            return {"ok": bool(data.get("ok")), "ts": data.get("ts"), "error": data.get("error")}
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            return False, "private_or_local_ip_is_blocked"
+    except ValueError:
+        pass
+    return True, "ok"
+
+
+def _runtime_http_scope(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return url
+
+
+def _find_runtime_http_grant(url: str, *, actor: str) -> str | None:
+    """Return an active grant matching the runtime HTTP scope, if one exists."""
+    from . import approvals
+
+    scope = _runtime_http_scope(url)
+    for grant in approvals.list_grants(status="active", limit=200):
+        if grant.get("action_type") != "external_api":
+            continue
+        if "external_api" not in set(grant.get("permissions") or []):
+            continue
+        grant_scope = grant.get("scope") or "*"
+        if grant_scope not in {"*", scope}:
+            continue
+        approval = approvals.get_request(grant.get("approval_id") or "")
+        requested_by = approval.get("requested_by") if approval else None
+        if requested_by and requested_by != actor:
+            continue
+        return grant.get("id")
+    return None
+
+
+def _validate_runtime_http_grant(url: str, grant_id: str | None, *, consume: bool, actor: str) -> dict:
+    ok, reason = _is_public_http_url(url)
+    if not ok:
+        return {"ok": False, "blocked": True, "reason": reason}
+    from . import approvals, connectors
+    if not connectors._is_allowed_url(url):  # noqa: SLF001 - shared connector allowlist is the runtime policy.
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "url_not_in_GENESIS_CONNECTOR_HTTP_ALLOWLIST",
+        }
+    if not grant_id:
+        grant_id = _find_runtime_http_grant(url, actor=actor)
+    if not grant_id:
+        request = approvals.create_request(
+            title="Runtime HTTP access requested",
+            action_type="external_api",
+            reason=f"Organism requested runtime HTTP access to {_runtime_http_scope(url)}.",
+            requested_by=actor,
+            source="runtime_tool",
+            risk_level="medium",
+            payload={"scope": _runtime_http_scope(url), "url": url},
+            permissions=["external_api"],
+            expires_in_minutes=240,
+        )
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "permission_grant_required",
+            "approval_request": request,
+        }
+    check = approvals.validate_grant(
+        grant_id,
+        permission="external_api",
+        action_type="external_api",
+        scope=_runtime_http_scope(url),
+        consume=consume,
+        actor=actor,
+    )
+    if not check["ok"]:
+        return {"ok": False, "blocked": True, "reason": check["reason"], "grant": check["grant"]}
+    return {"ok": True, "blocked": False, "grant": check["grant"]}
+
+
+def _validate_mcp_forge_grant(name: str, grant_id: str | None, *, actor: str) -> dict:
+    from . import approvals
+    scope = f"mcp_forge:{name}"
+    if not grant_id:
+        request = approvals.create_request(
+            title=f"Forge MCP server: {name}",
+            action_type="deploy_change",
+            reason="Organism requested permission to generate and attach executable MCP server code.",
+            requested_by=actor,
+            source="runtime_tool",
+            risk_level="high",
+            payload={"scope": scope, "name": name},
+            permissions=["deploy_change"],
+            expires_in_minutes=240,
+        )
+        return {
+            "ok": False,
+            "blocked": True,
+            "reason": "permission_grant_required",
+            "approval_request": request,
+        }
+    check = approvals.validate_grant(
+        grant_id,
+        permission="deploy_change",
+        action_type="deploy_change",
+        scope=scope,
+        consume=True,
+        actor=actor,
+    )
+    if not check["ok"]:
+        return {"ok": False, "blocked": True, "reason": check["reason"], "grant": check["grant"]}
+    return {"ok": True, "blocked": False, "grant": check["grant"]}
+
+
+async def _tool_fetch_web_page(url: str, grant_id: str = "", org_id: str = "") -> dict:
+    import re
+
+    import httpx
+
+    permission = _validate_runtime_http_grant(
+        url,
+        grant_id,
+        consume=True,
+        actor=org_id or "genesis_runtime",
+    )
+    if not permission["ok"]:
+        return {
+            **permission,
+            "message": "Runtime web fetch blocked by approval and HTTP allowlist policy.",
+        }
+    try:
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=True,
+            headers={"User-Agent": "Genesis/1.0"},
+        ) as client:
+            response = await client.get(url)
+        text = response.text
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return {
+            "ok": response.is_success,
+            "status": response.status_code,
+            "content": text[:4000],
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-async def _tool_fetch_web_page(url: str) -> dict:
+async def _tool_forge_mcp_server(name: str, description: str, org_id: str = "", grant_id: str = "") -> dict:
     try:
-        from backend.tools.executor import _fetch_web_page
-        content = await _fetch_web_page({"url": url})
-        return {"ok": True, "content": content[:4000]}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-async def _tool_forge_mcp_server(name: str, description: str, org_id: str = "") -> dict:
-    try:
+        safe_name = "".join(ch for ch in str(name or "") if ch.isalnum() or ch in ("-", "_"))[:80]
+        if not safe_name:
+            return {"ok": False, "blocked": True, "reason": "invalid_server_name"}
+        permission = _validate_mcp_forge_grant(safe_name, grant_id, actor=org_id or "genesis_runtime")
+        if not permission["ok"]:
+            return {
+                **permission,
+                "message": "MCP server forging is blocked until a scoped deploy_change grant is approved.",
+            }
         from backend.shared.gemini_client import generate_text
         from backend.shared.config import settings
         import os
@@ -98,7 +342,7 @@ Return ONLY valid Python code without markdown fences.
         org_dir = store._organism_dir(org.id)
         mcps_dir = org_dir / "mcps"
         os.makedirs(mcps_dir, exist_ok=True)
-        file_path = str(mcps_dir / f"{name}.py")
+        file_path = str(mcps_dir / f"{safe_name}.py")
         
         with open(file_path, "w") as f:
             f.write(code)
@@ -108,30 +352,66 @@ Return ONLY valid Python code without markdown fences.
         import sys
         python_exe = sys.executable
         
-        spec = MCPServerSpec(name=name, command=python_exe, args=[file_path])
+        spec = MCPServerSpec(name=safe_name, command=python_exe, args=[file_path])
         org.mcp_servers.append(spec)
         store.save_organism(org)
         
         await pool.ensure_organism(org.id, [spec])
         
-        return {"ok": True, "path": file_path, "message": f"MCP server '{name}' successfully created, attached to your DNA, and loaded into your available tools!"}
+        return {"ok": True, "path": file_path, "grant": permission.get("grant"), "message": f"MCP server '{safe_name}' successfully created, attached, and loaded into available tools."}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 async def _tool_http_request(method: str, url: str, headers: dict | None = None,
-                             body: dict | None = None) -> dict:
+                             body: dict | None = None, grant_id: str = "",
+                             org_id: str = "") -> dict:
     import httpx
+    permission = _validate_runtime_http_grant(
+        url,
+        grant_id,
+        consume=True,
+        actor=org_id or "genesis_runtime",
+    )
+    if not permission["ok"]:
+        return {
+            **permission,
+            "message": "Runtime HTTP request blocked by approval and HTTP allowlist policy.",
+        }
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.request(method.upper(), url, headers=headers or {}, json=body)
+        safe_headers = {str(k): str(v) for k, v in (headers or {}).items() if str(k).lower() not in {"host", "content-length", "connection"}}
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as c:
+            r = await c.request(method.upper(), url, headers=safe_headers, json=body)
             try:
                 payload = r.json()
             except Exception:
                 payload = r.text[:1500]
-            return {"ok": r.is_success, "status": r.status_code, "body": payload}
+            return {"ok": r.is_success, "status": r.status_code, "body": payload, "grant": permission.get("grant")}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+async def _tool_sandbox_python(
+    code: str,
+    input_data: dict | None = None,
+    purpose: str = "",
+    org_id: str = "",
+) -> dict:
+    from . import tool_sandbox
+    run = await tool_sandbox.run_python(
+        code=code,
+        input_data=input_data or {},
+        organism_id=org_id or None,
+        purpose=purpose,
+    )
+    return {
+        "ok": run.get("ok", False),
+        "run_id": run["id"],
+        "status": run["status"],
+        "result": run.get("result"),
+        "stdout": run.get("stdout", ""),
+        "error": run.get("error"),
+    }
 
 
 # ── Phase 5B & 5C Tools ────────────────────────────────────────────────
@@ -199,9 +479,10 @@ async def _tool_send_message(recipient_id: str, content: dict, org_id: str = "")
 TOOLS: dict[str, tuple[Callable[..., Awaitable[dict]], str]] = {
     "send_slack": (_tool_send_slack, "Post a message to a Slack channel or User. Args: channel (str, can be channel ID like #general or User ID for DM), text (str)."),
     "http_request": (_tool_http_request,
-                     "Make an HTTP request. Args: method (str), url (str), headers (dict, optional), body (dict, optional)."),
-    "fetch_web_page": (_tool_fetch_web_page, "Fetch and read the text content of a web page. Args: url (str)."),
-    "forge_mcp_server": (_tool_forge_mcp_server, "Autonomously write and deploy a new MCP Python server to give yourself new capabilities. Args: name (str, no spaces), description (str, detailed explanation of what APIs it connects to and what tools it should expose)."),
+                     "Permission-gated HTTP request. Args: method (str), url (str), grant_id (str, required after approval), headers (dict, optional), body (dict, optional). URL must be in GENESIS_CONNECTOR_HTTP_ALLOWLIST."),
+    "fetch_web_page": (_tool_fetch_web_page, "Permission-gated web page fetch. Args: url (str), grant_id (str, required after approval). URL must be in GENESIS_CONNECTOR_HTTP_ALLOWLIST."),
+    "sandbox_python": (_tool_sandbox_python, "Module 3: Run small analysis-only Python code in an isolated sandbox. Args: code (str), input_data (dict, optional), purpose (str). Put final JSON-serializable output in variable `result`. No file/network access."),
+    "forge_mcp_server": (_tool_forge_mcp_server, "Permission-gated MCP server generation. Args: name (str, no spaces), description (str), grant_id (str, required after approval). Without a grant this creates an approval request instead of writing code."),
     "decompose_goal": (_tool_decompose_goal, "Phase 5B: Break your intent into sub-goals and spawn child organisms to solve them. Args: sub_goals (list of {goal: str, priority: int})."),
     "check_children": (_tool_check_children, "Phase 5B: Check the status and results of your spawned child organisms. Args: {}."),
     "broadcast": (_tool_broadcast, "Phase 5C: Send a message to all other living organisms. Args: content (dict)."),
@@ -221,6 +502,7 @@ You will be given:
   - INTENT: the immutable goal you exist to serve
   - CONSTRAINTS / FORBIDDEN: hard rules
   - LEARNED PATTERNS: durable insights from your past experiences (real + dreamt)
+  - LONG TERM MEMORY: retrieved lessons from prior organisms and benchmark runs
   - RECENT MEMORY: the last few decisions you made (real)
   - RELEVANT DREAMS: hypothetical scenarios you have already imagined matching this moment
   - CURRENT PERCEPTION: the new event you must respond to
@@ -242,6 +524,15 @@ Rules:
   - If the intent is satisfied for this perception, action.name = "declare_done".
   - If you need no action (purely observational), action.name = "noop".
   - Never invent tool names. Only use tools listed in AVAILABLE TOOLS.
+  - RECENT MEMORY may include result_preview. Treat that preview as usable
+    evidence from the prior tool result; do not wait for it to arrive again.
+  - If result_preview.github_file.decoded_text_preview is present, use that
+    text directly. Do NOT try to decode base64 yourself.
+  - Keep action args compact. Do NOT copy large RECENT MEMORY payloads into
+    sandbox_python.input_data. If result_preview already contains enough
+    structure to reason from, summarize it in reasoning and choose remember,
+    send_slack, http_request for the next specific file, or noop.
+  - Return only one complete JSON object. No markdown fences.
 
 CRITICAL — ANTI-REPETITION:
   - BEFORE choosing an action, carefully review RECENT MEMORY.
@@ -253,6 +544,11 @@ CRITICAL — ANTI-REPETITION:
     Each perception cycle should advance to the NEXT step.
   - If you see MCP tools (prefixed mcp__) in AVAILABLE TOOLS, prefer using
     those over forge_mcp_server — the server is already running.
+  - If the organism already has a github_repo perception source, repository
+    monitoring is already configured. Do NOT use forge_mcp_server just to
+    monitor GitHub issues, pull requests, or repository events. Respond to the
+    github_repo perception, remember useful findings, send approved summaries,
+    or noop while waiting for the next source tick.
 """
 
 
@@ -262,7 +558,67 @@ def _build_prompt(
     recent_memory: list[Decision],
     relevant_dreams: list[Decision],
     tool_catalog: list[dict] | None = None,
+    long_term_memory: list[dict] | None = None,
 ) -> str:
+    def _result_preview(result: object) -> object:
+        if not isinstance(result, dict):
+            return None
+        preview: dict[str, object] = {}
+        for key in ("ok", "status", "reason", "message", "error"):
+            if key in result:
+                preview[key] = result.get(key)
+
+        body = result.get("body")
+        if isinstance(body, list):
+            items = []
+            for item in body[:30]:
+                if isinstance(item, dict):
+                    items.append({
+                        "name": item.get("name"),
+                        "path": item.get("path"),
+                        "type": item.get("type"),
+                        "size": item.get("size"),
+                    })
+                else:
+                    items.append(str(item)[:160])
+            preview["body_items"] = items
+            preview["body_count"] = len(body)
+        elif isinstance(body, dict):
+            preview["body_keys"] = list(body.keys())[:30]
+            if body.get("encoding") == "base64" and isinstance(body.get("content"), str):
+                try:
+                    import base64
+
+                    raw = "".join(str(body.get("content") or "").split())
+                    decoded = base64.b64decode(raw).decode("utf-8", errors="replace")
+                    preview["github_file"] = {
+                        "name": body.get("name"),
+                        "path": body.get("path"),
+                        "size": body.get("size"),
+                        "encoding": body.get("encoding"),
+                        "decoded_text_preview": decoded[:4000],
+                        "decoded_text_truncated": len(decoded) > 4000,
+                    }
+                except Exception as exc:
+                    preview["github_file_decode_error"] = str(exc)[:200]
+            preview["body_excerpt"] = {
+                str(k): str(body[k])[:1200]
+                for k in list(body.keys())[:10]
+                if k != "content" and isinstance(body.get(k), (str, int, float, bool, type(None)))
+            }
+        elif body is not None:
+            preview["body_excerpt"] = str(body)[:1200]
+
+        grant = result.get("grant")
+        if isinstance(grant, dict):
+            preview["grant"] = {
+                "id": grant.get("id"),
+                "scope": grant.get("scope"),
+                "uses": grant.get("uses"),
+                "max_uses": grant.get("max_uses"),
+            }
+        return preview or None
+
     def _decision_brief(d: Decision) -> dict:
         return {
             "id": d.id,
@@ -270,6 +626,7 @@ def _build_prompt(
             "trigger": d.trigger,
             "action": d.action,
             "result_ok": d.result.get("ok") if isinstance(d.result, dict) else None,
+            "result_preview": _result_preview(d.result),
             "reasoning": d.reasoning[:300],
             "is_dream": d.is_dream,
         }
@@ -294,18 +651,57 @@ def _build_prompt(
         tools_doc = {name: desc for name, (_, desc) in TOOLS.items()}
         tools_doc["noop"] = "Take no action. Args: {}."
 
+    active_grants = []
+    try:
+        from . import approvals
+
+        for grant in approvals.list_grants(status="active", limit=200):
+            approval = approvals.get_request(grant.get("approval_id") or "")
+            if approval and approval.get("requested_by") != org.id:
+                continue
+            active_grants.append({
+                "id": grant.get("id"),
+                "action_type": grant.get("action_type"),
+                "scope": grant.get("scope"),
+                "permissions": grant.get("permissions") or [],
+                "uses": grant.get("uses", 0),
+                "max_uses": grant.get("max_uses"),
+                "expires_at": grant.get("expires_at"),
+            })
+    except Exception:
+        active_grants = []
+
     parts = {
         "INTENT": org.intent.goal,
         "CONSTRAINTS": org.intent.constraints,
         "FORBIDDEN": org.intent.forbidden,
         "SUCCESS_SIGNALS": org.intent.success_signals,
+        "PERCEPTION_SOURCES": org.perception_sources,
+        "ACTIVE_PERMISSION_GRANTS": active_grants,
         "LEARNED_PATTERNS": org.learned_patterns,
+        "LONG_TERM_MEMORY": long_term_memory or [],
         "RECENT_MEMORY": [_decision_brief(d) for d in recent_memory],
         "RELEVANT_DREAMS": [_decision_brief(d) for d in relevant_dreams],
         "CURRENT_PERCEPTION": perception,
         "AVAILABLE_TOOLS": tools_doc,
     }
     return json.dumps(parts, indent=2, default=str)
+
+
+def _has_github_repo_source(org: Organism) -> bool:
+    return any(src.get("kind") == "github_repo" for src in (org.perception_sources or []))
+
+
+def _github_monitoring_already_configured(ctx) -> bool:
+    if not ctx.organism:
+        return False
+    if str(ctx.perception.get("source") or "") == "github_repo":
+        return True
+    goal = ctx.organism.intent.goal.lower()
+    return _has_github_repo_source(ctx.organism) and any(
+        term in goal
+        for term in ("github", "repository", "repo", "pull request", "issue")
+    )
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -348,7 +744,7 @@ async def _execute_tool(name: str, args: dict, org: Organism) -> dict:
         return {"ok": False, "error": f"tool {name} has no implementation"}
         
     # Inject organism ID into meta-tools that need it
-    if name in ("forge_mcp_server", "decompose_goal", "check_children", "broadcast", "send_message"):
+    if name in ("http_request", "fetch_web_page", "forge_mcp_server", "decompose_goal", "check_children", "broadcast", "send_message", "sandbox_python"):
         args["org_id"] = org.id
         
     try:
@@ -370,7 +766,8 @@ async def _reason_with_llm(ctx) -> str:
     """Build prompt from context and call the LLM. Returns raw LLM output string."""
     org = ctx.organism
     prompt = _build_prompt(org, ctx.perception, ctx.real_history, ctx.dream_history,
-                           tool_catalog=getattr(ctx, "tool_catalog", None) or None)
+                           tool_catalog=getattr(ctx, "tool_catalog", None) or None,
+                           long_term_memory=getattr(ctx, "long_term_memory", None) or None)
     if ctx.skills_text:
         prompt = ctx.skills_text + "\n\n" + prompt
 
@@ -401,10 +798,28 @@ async def _reason_with_llm(ctx) -> str:
         system=strategy_system,
         model=org.reasoning_model,
         temperature=0.4 if ctx.is_dream else 0.1,
-        max_tokens=2000,
+        max_tokens=3500,
     )
 
     parsed = _parse_llm_json(raw)
+    if (
+        not raw.lstrip().startswith("{")
+        and (parsed.get("action") or {}).get("name") == "noop"
+        and not parsed.get("alternatives")
+    ):
+        raw = await generate_text(
+            prompt=(
+                "Convert this organism reasoning into one valid compact JSON object "
+                "with keys reasoning, action, alternatives. Use only tools from the "
+                "original AVAILABLE_TOOLS. Do not add markdown fences.\n\n"
+                f"ORIGINAL RESPONSE:\n{raw[:5000]}"
+            ),
+            system=strategy_system,
+            model=org.reasoning_model,
+            temperature=0,
+            max_tokens=1200,
+        )
+        parsed = _parse_llm_json(raw)
     reasoning = str(parsed.get("reasoning", ""))[:4000]
     action = parsed.get("action") or {"name": "noop", "args": {}}
     action_name = str(action.get("name", "noop"))
@@ -454,8 +869,26 @@ async def _execute_action(ctx) -> Decision:
     action_name = str(action.get("name", "noop"))
     action_args = action.get("args") or {}
 
+    if action_name == "forge_mcp_server" and _github_monitoring_already_configured(ctx):
+        reasoning = (
+            reasoning
+            + "\n\nSafety correction: GitHub repository monitoring is already configured "
+            "through the organism's github_repo perception source, so creating a new MCP "
+            "server for basic repository monitoring would be unnecessary."
+        )[:4000]
+        action_name = "noop"
+        action_args = {"reason": "github_repo_source_already_monitors_repository"}
+        alternatives = [
+            {
+                "name": "forge_mcp_server",
+                "args": action.get("args", {}),
+                "why_not": "A github_repo perception source already provides repository monitoring.",
+            },
+            *alternatives[:1],
+        ]
+
     # MCP tool dispatch — early return before built-in tool execution
-    tool_name = ctx.parsed.get("action", {}).get("name", "")
+    tool_name = action_name
     if tool_name.startswith("mcp__"):
         if ctx.is_dream:
             result = await _synthesize_dream_result(ctx, tool_name)
@@ -471,6 +904,7 @@ async def _execute_action(ctx) -> Decision:
             context_snapshot={
                 "recent_memory_ids": [d.id for d in real_history],
                 "dream_ids": [d.id for d in dream_history],
+                "long_term_memory_ids": [m.get("id") for m in getattr(ctx, "long_term_memory", [])],
                 "patterns_count": len(org.learned_patterns),
             },
             reasoning=reasoning,
@@ -496,6 +930,7 @@ async def _execute_action(ctx) -> Decision:
         context_snapshot={
             "recent_memory_ids": [d.id for d in real_history],
             "dream_ids": [d.id for d in dream_history],
+            "long_term_memory_ids": [m.get("id") for m in getattr(ctx, "long_term_memory", [])],
             "patterns_count": len(org.learned_patterns),
         },
         reasoning=reasoning,
@@ -522,8 +957,18 @@ async def _persist_and_emit(ctx) -> None:
         org = store.load_organism(org.id) or org
         
         action_name = decision.action.get("name", "noop")
-        if action_name == "declare_done":
-            org.state = OrganismState.PERCEIVING
+        completed_one_shot = _decision_completes_one_shot(org, decision)
+        new_skill_id = None
+        if completed_one_shot:
+            try:
+                from .skills import distill as _distill
+
+                new_skill_id = await _distill.distill(org.id)
+                org = store.load_organism(org.id) or org
+            except Exception as e:
+                logger.warning("distillation failed for completed organism %s: %s", org.id, e)
+            org.state = OrganismState.DEAD
+            org.perception_sources = []
         else:
             org.state = OrganismState.PERCEIVING
         store.save_organism(org)
@@ -533,6 +978,30 @@ async def _persist_and_emit(ctx) -> None:
                 "organism_id": ctx.organism_id,
                 "decision": decision.model_dump(mode="json"),
             })
+            if completed_one_shot:
+                await ctx.event_callback("organism.died", {
+                    "organism_id": ctx.organism_id,
+                    "reason": "intent_complete",
+                    "summary": decision.result.get("summary", ""),
+                    "patterns_donated": org.learned_patterns,
+                    "distilled_skill_id": new_skill_id or org.distilled_skill_id,
+                })
+                if new_skill_id:
+                    await ctx.event_callback("organism.distilled", {
+                        "organism_id": ctx.organism_id,
+                        "skill_id": new_skill_id,
+                    })
+
+        if action_name == "remember":
+            pattern = decision.action.get("args", {}).get("pattern", "")
+            if pattern:
+                from . import memory
+                item = memory.write_from_remember_action(org, decision, pattern)
+                if item and ctx.event_callback:
+                    await ctx.event_callback("memory.created", {
+                        "organism_id": org.id,
+                        "memory": item.model_dump(mode="json"),
+                    })
 
     # Compute fitness placeholder (new in Phase 1)
     if org and not ctx.is_dream:

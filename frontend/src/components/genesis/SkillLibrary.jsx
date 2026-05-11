@@ -2,18 +2,25 @@ import React, { useEffect, useState } from 'react'
 import SkillLineageGraph from './SkillLineageGraph'
 
 export default function SkillLibrary({ skills, onClose, getSkill, getSkillLineage,
-                                       deleteSkill, onSeedFromSkill }) {
+                                       deleteSkill, deleting, onSeedFromSkill }) {
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [lineage, setLineage] = useState(null)
+  const [error, setError] = useState(null)
 
   useEffect(() => {
     if (!selected) { setDetail(null); setLineage(null); return }
     let alive = true
-    Promise.all([getSkill(selected), getSkillLineage(selected)]).then(([d, l]) => {
-      if (!alive) return
-      setDetail(d); setLineage(l)
-    })
+    setError(null)
+    Promise.all([getSkill(selected), getSkillLineage(selected)])
+      .then(([d, l]) => {
+        if (!alive) return
+        setDetail(d); setLineage(l)
+      })
+      .catch((e) => {
+        if (!alive) return
+        setDetail(null); setLineage(null); setError(e.message || 'Failed to load skill')
+      })
     return () => { alive = false }
   }, [selected, getSkill, getSkillLineage])
 
@@ -61,6 +68,11 @@ export default function SkillLibrary({ skills, onClose, getSkill, getSkillLineag
             {!selected && (
               <div className="text-forge-muted text-sm italic">Select a skill to inspect.</div>
             )}
+            {error && (
+              <div className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded p-3">
+                {error}
+              </div>
+            )}
             {detail && (
               <div className="space-y-3 text-xs">
                 <div>
@@ -89,9 +101,14 @@ export default function SkillLibrary({ skills, onClose, getSkill, getSkillLineag
                     className="flex-1 px-3 py-1.5 rounded bg-purple-500/30 hover:bg-purple-500/50 border border-purple-400 text-purple-100 text-xs"
                   >🧬 Seed organism with this</button>
                   <button
-                    onClick={() => { if (confirm('Delete this skill from the pool?')) deleteSkill(detail.skill_id).then(() => setSelected(null)) }}
-                    className="px-3 py-1.5 rounded bg-red-500/20 hover:bg-red-500/40 border border-red-500/40 text-red-300 text-xs"
-                  >🗑 Delete</button>
+                    onClick={() => {
+                      if (!deleting && confirm('Delete this skill from the pool?')) {
+                        deleteSkill(detail.skill_id).then(() => setSelected(null))
+                      }
+                    }}
+                    disabled={deleting}
+                    className="px-3 py-1.5 rounded bg-red-500/20 hover:bg-red-500/40 border border-red-500/40 text-red-300 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                  >{deleting ? 'Deleting...' : '🗑 Delete'}</button>
                 </div>
               </div>
             )}

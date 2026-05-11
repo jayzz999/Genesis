@@ -125,11 +125,56 @@ async def _groq_generate_text(
         except Exception as e:
             err_str = str(e).lower()
             is_rate_limit = "429" in err_str or "rate_limit" in err_str or "rate limit" in err_str
-            if is_rate_limit and attempt < max_retries:
+            hard_quota = any(token in err_str for token in ("tokens per day", "requests per day", "quota"))
+            if is_rate_limit and not hard_quota and attempt < max_retries:
                 delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
                 logger.warning(
                     f"[Groq] 429 rate-limit on attempt {attempt + 1}/{max_retries + 1}. "
                     f"Retrying in {delay:.0f}s…"
+                )
+                await _asyncio.sleep(delay)
+            else:
+                raise
+
+
+async def _gemini_generate_text(
+    prompt: str,
+    system: str,
+    model: str | None = None,
+    temperature: float = 0,
+    max_tokens: int = 8000,
+) -> str:
+    """Call Gemini with bounded retry on transient quota/server errors."""
+    import asyncio as _asyncio
+
+    client = get_client()
+    max_retries = 3
+    base_delay = float(os.getenv("GENESIS_LLM_RETRY_BASE_DELAY_S", "5"))
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.aio.models.generate_content(
+                model=model or settings.GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            return response.text or ""
+        except Exception as e:
+            err_str = str(e).lower()
+            retryable = any(
+                token in err_str
+                for token in ("429", "rate", "quota", "resource exhausted", "503", "unavailable", "deadline")
+            )
+            hard_quota = any(token in err_str for token in ("requests per day", "free_tier", "resource exhausted"))
+            if retryable and not hard_quota and attempt < max_retries:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"[Gemini] transient provider error on attempt {attempt + 1}/{max_retries + 1}. "
+                    f"Retrying in {delay:.0f}s..."
                 )
                 await _asyncio.sleep(delay)
             else:
@@ -190,22 +235,248 @@ async def generate_text(
 
     All calls pass through the global rate guard (GENESIS_MAX_LLM_CALLS_PER_MIN).
     """
+    provider = settings.GENESIS_LLM_PROVIDER.lower()
+    if provider == "mock" or (
+        provider == "gemini" and not settings.GEMINI_API_KEY
+    ) or (
+        provider == "groq" and not settings.GROQ_API_KEY
+    ):
+        return _mock_generate_text(prompt=prompt, system=system)
+
     await _rate_guard()
 
-    if settings.GENESIS_LLM_PROVIDER == "groq":
+    if provider == "groq":
         return await _groq_generate_text(prompt, system, model, temperature, max_tokens)
 
-    client = get_client()
-    response = await client.aio.models.generate_content(
-        model=model or settings.GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-        ),
-    )
-    return response.text or ""
+    return await _gemini_generate_text(prompt, system, model, temperature, max_tokens)
+
+
+def _mock_generate_text(prompt: str, system: str = "") -> str:
+    """Deterministic local LLM stand-in for demos, tests, and no-key setup.
+
+    It preserves the JSON contracts expected by the runtime, critic, dreamer,
+    distiller, and compiler so the product can run end-to-end before API keys
+    are configured.
+    """
+    lower_system = system.lower()
+    lower_prompt = prompt.lower()
+
+    if "python mcp server code generator" in lower_system:
+        return '''from mcp.server.fastmcp import FastMCP
+
+server = FastMCP("mock_compiled_skill")
+
+@server.tool()
+async def apply_skill(context: str = "") -> dict:
+    """Apply a locally compiled Genesis skill."""
+    return {"ok": True, "summary": context[:500]}
+
+if __name__ == "__main__":
+    server.run()
+'''
+
+    if "distilling a digital organism" in lower_system:
+        return json.dumps({
+            "name": "local_distilled_skill",
+            "description": "A deterministic skill distilled by the local mock provider.",
+            "trigger_patterns": ["task", "test_event"],
+            "forbidden_patterns": [],
+            "body": (
+                "# What this knows\n"
+                "- Work from the organism intent and current perception.\n\n"
+                "# What worked\n"
+                "- Prefer safe, explicit actions with readable reasoning.\n\n"
+                "# What failed\n"
+                "- Avoid inventing unavailable tools.\n\n"
+                "# Patterns observed\n"
+                "- Record decisions so later organisms can inherit context.\n"
+            ),
+        })
+
+    if "plausible-but-not-yet-occurred" in lower_system:
+        return json.dumps([
+            {"type": "mock_future", "payload": {"case": "common"}},
+            {"type": "mock_edge_case", "payload": {"case": "edge"}},
+        ])
+
+    if "meta-cognitive critic" in lower_system:
+        return json.dumps({
+            "reasoning_quality": 0.72,
+            "attention_gaps": [],
+            "action_efficiency": 0.68,
+            "repeated_mistake": False,
+            "lesson": "Choose the smallest available action that advances the intent.",
+            "knowledge_gaps": [],
+            "recommended_strategy": "systematic",
+            "strategy_performance_delta": 0.1,
+            "confidence": 0.76,
+        })
+
+    if "genesis multi-agent debate participant" in lower_system:
+        agent_name = "Debate Agent"
+        try:
+            payload = json.loads(prompt)
+            agent_name = payload.get("agent", {}).get("name") or agent_name
+            stance = payload.get("agent", {}).get("stance") or "Analyze the topic carefully."
+            topic = payload.get("topic") or "the requested topic"
+        except Exception:
+            stance = "Analyze the topic carefully."
+            topic = "the requested topic"
+        return json.dumps({
+            "recommendation": (
+                f"{agent_name} recommends advancing '{topic}' with a narrow, testable implementation "
+                f"that honors its role: {stance}"
+            ),
+            "evidence": [
+                "The system already has organisms, memory, tools, and benchmark phases to build on.",
+                "A bounded debate loop can be audited and repeated without changing external state.",
+            ],
+            "risks": [
+                "Agents may converge too early without explicit critique.",
+                "The synthesis can overstate confidence if proposals are weak.",
+            ],
+            "tests": [
+                "Run a debate through the API and confirm proposals, critiques, and synthesis are persisted.",
+                "Verify the browser UI can start a debate and render the audit trail.",
+            ],
+            "confidence": 0.72,
+        })
+
+    if "genesis multi-agent debate critic" in lower_system:
+        try:
+            payload = json.loads(prompt)
+            proposals = payload.get("proposals_to_review") or []
+            target = proposals[0] if proposals else {}
+        except Exception:
+            target = {}
+        return json.dumps({
+            "target_agent_id": target.get("agent_id"),
+            "strongest_point": "The proposal is concrete enough to test.",
+            "weakest_point": "It needs sharper acceptance criteria and a clearer rollback path.",
+            "revision": "Add measurable success criteria, failure handling, and a browser/API verification step.",
+            "score": 0.68,
+        })
+
+    if "genesis multi-agent debate synthesis judge" in lower_system:
+        try:
+            payload = json.loads(prompt)
+            topic = payload.get("topic") or "the requested topic"
+            proposals = payload.get("scored_proposals") or []
+            top = proposals[0] if proposals else {}
+        except Exception:
+            topic = "the requested topic"
+            top = {}
+        return json.dumps({
+            "decision": (
+                f"Proceed with the review-board workflow for '{topic}' as an auditable multi-agent debate room: "
+                "independent proposals, adversarial critique, ranked synthesis, and persisted run history."
+            ),
+            "consensus": [
+                "Use multiple specialist perspectives instead of a single response path.",
+                "Keep every proposal and critique inspectable.",
+                "Validate through API and browser flows.",
+            ],
+            "dissent": [
+                "Confidence should remain bounded until debates are compared against real task outcomes.",
+            ],
+            "risks": [
+                "Synthetic agreement can hide missing evidence.",
+                "Too many agents can increase latency and cost.",
+            ],
+            "next_actions": [
+                "Expose debate runs in the UI.",
+                "Persist debate conclusions into long-term memory.",
+                "Add regression tests around the debate API contract.",
+            ],
+            "confidence": max(0.65, min(0.82, float(top.get("debate_score", 0.72) or 0.72))),
+        })
+
+    if "genesis self-improvement proposer" in lower_system:
+        try:
+            payload = json.loads(prompt)
+            objective = payload.get("objective") or "Improve Genesis safely"
+        except Exception:
+            objective = "Improve Genesis safely"
+        return json.dumps({
+            "title": "Strict promotion gate for self-improvement",
+            "problem": (
+                "Genesis can generate improvement ideas, but without strict gates it could promote "
+                "changes before benchmark evidence, regression controls, and rollback plans are clear."
+            ),
+            "hypothesis": (
+                f"For objective '{objective}', requiring benchmark delta, passing checks, safety review, "
+                "and rollback evidence before promotion will reduce unsafe regressions."
+            ),
+            "change_summary": (
+                "Evaluate each proposed improvement through deterministic gates before it can be marked "
+                "approved for experiment."
+            ),
+            "expected_metrics": {
+                "benchmark_delta": 0.04,
+                "regression_risk": 0.18,
+            },
+            "tests": [
+                "Unit contract test for passing and failing gates.",
+                "Production build check for the improvement-gates panel.",
+                "Browser run confirming visible gate verdicts.",
+            ],
+            "rollback_plan": "Keep the candidate blocked unless gates pass; rollback by discarding the run record or reverting the candidate branch.",
+            "safety_notes": [
+                "No autonomous deployment.",
+                "Human review remains required after gates pass.",
+                "High-risk intents are blocked by deterministic terms.",
+            ],
+            "confidence": 0.78,
+        })
+
+    if "genesis autonomous operator planner" in lower_system:
+        try:
+            payload = json.loads(prompt)
+            tick_count = int(payload.get("operator", {}).get("tick_count") or 0)
+            goal = payload.get("operator", {}).get("goal") or "Maintain Genesis"
+        except Exception:
+            tick_count = 0
+            goal = "Maintain Genesis"
+        if tick_count % 3 == 0:
+            return json.dumps({
+                "action": "evaluate_improvement",
+                "rationale": "The safest autonomous progress is to evaluate a bounded improvement through strict gates.",
+                "args": {
+                    "objective": f"Autonomously improve progress toward: {goal}",
+                    "evidence": {
+                        "benchmark_delta": 0.03,
+                        "regression_risk": 0.2,
+                        "confidence": 0.72,
+                        "checks": {"unit": True, "build": True, "browser": True},
+                        "tests": ["operator tick audit", "strict gate evaluation"],
+                    },
+                },
+                "confidence": 0.72,
+            })
+        return json.dumps({
+            "action": "record_checkpoint",
+            "rationale": "Record a reversible checkpoint and wait for the next cadence.",
+            "args": {},
+            "confidence": 0.68,
+        })
+
+    action = {"name": "noop", "args": {}}
+    reasoning = "Local mock reasoning selected a safe no-op because no external action was required."
+    if "declare_done" in lower_prompt and ("done" in lower_prompt or "satisfied" in lower_prompt):
+        action = {"name": "declare_done", "args": {"summary": "Completed by local mock provider."}}
+        reasoning = "The current perception appears to satisfy the organism intent."
+    elif "remember" in lower_prompt:
+        action = {"name": "remember", "args": {"pattern": "Use local mock mode for deterministic offline validation."}}
+        reasoning = "Recording a durable pattern is the safest useful action for this perception."
+
+    return json.dumps({
+        "reasoning": reasoning,
+        "action": action,
+        "alternatives": [
+            {"name": "noop", "args": {}, "why_not": "Less informative than the selected action."},
+            {"name": "declare_done", "args": {"summary": "Not yet confirmed."}, "why_not": "Intent completion is not explicit."},
+        ],
+    })
 
 
 async def generate_with_tools(

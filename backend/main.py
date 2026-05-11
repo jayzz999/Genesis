@@ -2,14 +2,18 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.genesis.api import router as genesis_router
 from backend.genesis import events as _genesis_events
+from backend.shared.config import settings
 
 logging.basicConfig(level=logging.INFO)
 
@@ -49,6 +53,12 @@ async def _genesis_to_ws(event: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.validate_startup()
+
+    from backend.genesis import long_term as _long_term
+    _long_term.init()
+    print("[Genesis] Long-term database/auth substrate ready")
+
     # Start organism heartbeat supervisor
     from backend.genesis import lifecycle as _lifecycle
     _lifecycle.start()
@@ -64,12 +74,21 @@ async def lifespan(app: FastAPI):
     # Forward all genesis events to WebSocket clients
     _genesis_events.subscribe(_genesis_to_ws)
 
+    # Start persistent autonomous operator supervisor
+    from backend.genesis import autonomous_operator as _operator
+    _operator.start(event_callback=_genesis_events.emit)
+
     yield
 
     # Shutdown
     try:
         from backend.genesis import lifecycle as _lifecycle
         await _lifecycle.stop()
+    except Exception:
+        pass
+    try:
+        from backend.genesis import autonomous_operator as _operator
+        await _operator.stop()
     except Exception:
         pass
     try:
@@ -81,10 +100,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Genesis", version="1.0.0", lifespan=lifespan)
 
+if settings.GENESIS_TRUSTED_HOSTS:
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.GENESIS_TRUSTED_HOSTS,
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.GENESIS_CORS_ORIGINS,
+    allow_credentials="*" not in settings.GENESIS_CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -101,6 +126,17 @@ async def health():
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(ws: WebSocket, client_id: str):
+    if settings.GENESIS_REQUIRE_API_TOKEN:
+        token = ws.query_params.get("token") or ws.headers.get("x-genesis-token", "")
+        from backend.genesis import long_term as _long_term
+        static_ok = bool(settings.GENESIS_API_TOKEN) and secrets.compare_digest(
+            token,
+            settings.GENESIS_API_TOKEN,
+        )
+        session_ok = bool(_long_term.validate_session_token(token))
+        if not (static_ok or session_ok):
+            await ws.close(code=1008)
+            return
     await manager.connect(ws, client_id)
     try:
         while True:
@@ -112,11 +148,25 @@ async def websocket_endpoint(ws: WebSocket, client_id: str):
         manager.disconnect(client_id)
 
 
+_frontend_dist = os.getenv("GENESIS_FRONTEND_DIST", "frontend/dist")
+if os.path.exists(_frontend_dist):
+    app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")
+
+
+def _uvicorn_reload_options() -> dict:
+    reload_enabled = settings.GENESIS_RELOAD and not settings.is_production
+    options = {"reload": reload_enabled}
+    if reload_enabled:
+        options["reload_dirs"] = settings.GENESIS_RELOAD_DIRS or ["backend"]
+        options["reload_excludes"] = settings.GENESIS_RELOAD_EXCLUDES
+    return options
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "backend.main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8002")),
-        reload=True,
+        **_uvicorn_reload_options(),
     )

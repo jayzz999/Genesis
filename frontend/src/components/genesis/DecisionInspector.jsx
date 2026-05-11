@@ -3,7 +3,15 @@ import React, { useState, useEffect } from 'react'
 // Slide-in panel showing full decision details + edit modal.
 // On edit submit, calls onEdit(decisionId, { new_action, new_reasoning }) which
 // returns a CounterfactualBranch.
-export default function DecisionInspector({ decision, onClose, onEdit, onPromoteBranch, branches }) {
+export default function DecisionInspector({
+  decision,
+  onClose,
+  onEdit,
+  onPromoteBranch,
+  branches,
+  editPending,
+  promotePending,
+}) {
   const [editing, setEditing] = useState(false)
   const [reasoning, setReasoning] = useState('')
   const [actionJson, setActionJson] = useState('')
@@ -113,9 +121,10 @@ export default function DecisionInspector({ decision, onClose, onEdit, onPromote
               {!matchingBranch.promoted && (
                 <button
                   onClick={() => onPromoteBranch(matchingBranch.id)}
-                  className="w-full mt-1 px-3 py-1.5 rounded bg-purple-500/30 hover:bg-purple-500/50 border border-purple-400 text-purple-100 text-xs font-medium"
+                  disabled={promotePending}
+                  className="w-full mt-1 px-3 py-1.5 rounded bg-purple-500/30 hover:bg-purple-500/50 border border-purple-400 text-purple-100 text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  ⭐ Promote to canonical reality
+                  {promotePending ? 'Promoting...' : '⭐ Promote to canonical reality'}
                 </button>
               )}
             </div>
@@ -135,10 +144,10 @@ export default function DecisionInspector({ decision, onClose, onEdit, onPromote
             >Cancel</button>
             <button
               onClick={submitEdit}
-              disabled={submitting}
+              disabled={submitting || editPending}
               className="flex-1 px-3 py-2 rounded bg-amber-500/30 hover:bg-amber-500/50 border border-amber-400 text-amber-100 text-xs font-medium"
             >
-              {submitting ? 'Replaying causality...' : '✏ Rewrite history'}
+              {submitting || editPending ? 'Replaying causality...' : '✏ Rewrite history'}
             </button>
           </>
         ) : (

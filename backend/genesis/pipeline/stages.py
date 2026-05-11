@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from .. import store
-from ..types import Decision, Organism
+from ..types import Decision, Organism, OrganismState
 
 logger = logging.getLogger("genesis.pipeline")
 
@@ -33,6 +33,7 @@ class PipelineContext:
     real_history: list[Decision] = field(default_factory=list)
     dream_history: list[Decision] = field(default_factory=list)
     skills_text: str = ""
+    long_term_memory: list[dict] = field(default_factory=list)
     tool_catalog: list[dict] = field(default_factory=list)
     llm_raw: str = ""
     parsed: dict = field(default_factory=dict)
@@ -63,6 +64,11 @@ async def gather_context(ctx: PipelineContext) -> None:
     ctx.dream_history = [d for d in all_decisions if d.is_dream][-5:]
     from ..skills import inherit
     ctx.skills_text = inherit.load_skills_text(ctx.organism)
+    from .. import memory
+    ctx.long_term_memory = [
+        item.model_dump(mode="json")
+        for item in memory.retrieve(ctx.organism, ctx.perception, limit=5)
+    ]
 
 
 async def load_capabilities(ctx: PipelineContext) -> None:
@@ -110,6 +116,63 @@ async def meta_critique(ctx: PipelineContext) -> None:
         logger.warning(f"[pipeline] meta_critique failed (non-fatal): {e}")
 
 
+def _is_provider_quota_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "quota",
+            "rate_limit",
+            "rate limit",
+            "resource_exhausted",
+            "tokens per day",
+        )
+    )
+
+
+def _can_record_quota_fallback(ctx: PipelineContext) -> bool:
+    return bool(not ctx.is_dream and ctx.organism)
+
+
+async def record_quota_fallback(ctx: PipelineContext, exc: Exception) -> Decision:
+    reasoning = (
+        "Autonomous perception was received, but the configured LLM provider "
+        "rejected the reasoning call due to quota or rate limits. Recording the "
+        "observation and deferring action so causal memory remains honest."
+    )
+    ctx.decision = Decision(
+        organism_id=ctx.organism_id,
+        parent_ids=ctx.parent_ids or ([ctx.real_history[-1].id] if ctx.real_history else []),
+        trigger=ctx.perception,
+        context_snapshot={
+            "recent_memory_ids": [d.id for d in ctx.real_history],
+            "dream_ids": [d.id for d in ctx.dream_history],
+            "long_term_memory_ids": [m.get("id") for m in ctx.long_term_memory],
+            "patterns_count": len(ctx.organism.learned_patterns),
+            "fallback": "provider_quota",
+        },
+        reasoning=reasoning,
+        action={"name": "noop", "args": {"reason": "provider_quota"}},
+        result={
+            "ok": False,
+            "deferred": True,
+            "provider_quota": True,
+            "error": str(exc)[:1000],
+        },
+        alternatives_considered=[
+            {
+                "name": "retry_later",
+                "args": {},
+                "why_not": "Provider quota indicated the next successful attempt needs to wait.",
+            }
+        ],
+        strategy_used=ctx.organism.active_strategy_id,
+    )
+    await record(ctx)
+    return ctx.decision
+
+
 async def run(
     organism_id: str,
     perception: dict,
@@ -127,11 +190,21 @@ async def run(
         parent_ids=parent_ids,
         event_callback=event_callback,
     )
-    await gather_context(ctx)
-    await load_capabilities(ctx)
-    await reason(ctx)
-    await act(ctx)
-    await record(ctx)
-    await meta_critique(ctx)  # Phase 5A: self-evaluate reasoning quality
-    assert ctx.decision is not None
-    return ctx.decision
+    try:
+        await gather_context(ctx)
+        await load_capabilities(ctx)
+        await reason(ctx)
+        await act(ctx)
+        await record(ctx)
+        await meta_critique(ctx)  # Phase 5A: self-evaluate reasoning quality
+        assert ctx.decision is not None
+        return ctx.decision
+    except Exception as exc:
+        if _is_provider_quota_error(exc) and _can_record_quota_fallback(ctx):
+            return await record_quota_fallback(ctx, exc)
+        if not is_dream:
+            org = store.load_organism(organism_id)
+            if org and org.state == OrganismState.ACTING:
+                org.state = OrganismState.PERCEIVING
+                store.save_organism(org)
+        raise

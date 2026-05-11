@@ -1,6 +1,34 @@
 import React, { useState, useEffect, useRef } from 'react'
 
 const API = (path) => path
+const API_TOKEN = import.meta.env.VITE_GENESIS_API_TOKEN
+  || (typeof window !== 'undefined' ? window.localStorage.getItem('GENESIS_API_TOKEN') : '')
+  || ''
+
+function authHeaders(headers = {}) {
+  return API_TOKEN ? { ...headers, 'X-Genesis-Token': API_TOKEN } : headers
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(API(path), {
+    ...options,
+    headers: authHeaders(options.headers),
+  })
+  const text = await response.text()
+  let data = null
+  if (text) {
+    try {
+      data = JSON.parse(text)
+    } catch {
+      data = { detail: text }
+    }
+  }
+  if (!response.ok) {
+    const detail = data?.detail || data?.error || response.statusText || 'Request failed'
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+  }
+  return data || {}
+}
 
 // ── Fitness bar ──────────────────────────────────────────────────────
 function FitnessBar({ value, size = 'md' }) {
@@ -34,6 +62,8 @@ function FitnessBadge({ value }) {
 
 // ── Organism card inside a generation ───────────────────────────────
 function OrganismCard({ score, rank, survived }) {
+  const alignment = score.benchmark_alignment
+  const alignmentPct = alignment ? Math.round(alignment.score * 100) : null
   return (
     <div className={`p-3 rounded-lg border transition-all ${
       survived
@@ -60,6 +90,26 @@ function OrganismCard({ score, rank, survived }) {
         <span>efficiency {Math.round(score.action_efficiency_avg * 100)}%</span>
         <span>{score.decision_count} decisions</span>
       </div>
+      {alignment && (
+        <div className="mt-2 rounded-lg border border-forge-border/80 bg-forge-bg/50 p-2">
+          <div className="mb-1 flex items-center justify-between text-[10px]">
+            <span className="uppercase tracking-widest text-forge-muted">benchmark alignment</span>
+            <span className={alignmentPct >= 70 ? 'text-emerald-300' : alignmentPct >= 40 ? 'text-amber-300' : 'text-red-300'}>
+              {alignmentPct}%
+            </span>
+          </div>
+          <div className="grid gap-1">
+            {(alignment.criteria || []).map(item => (
+              <div key={item.id} className="flex items-center justify-between gap-2 text-[10px]">
+                <span className="truncate text-forge-muted" title={item.label}>{item.label}</span>
+                <span className={item.score > 0 ? 'text-emerald-300' : 'text-red-300/80'}>
+                  {item.score > 0 ? 'hit' : 'miss'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -171,29 +221,171 @@ function FitnessChart({ generations }) {
   )
 }
 
+// ── Evidence report ─────────────────────────────────────────────────
+function EvidenceReport({ report }) {
+  if (!report) return null
+
+  const bestDelta = Math.round((report.fitness?.best_delta || 0) * 100)
+  const meanDelta = Math.round((report.fitness?.mean_delta || 0) * 100)
+  const verdictStyle = {
+    improved: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30',
+    skills_distilled: 'text-amber-300 bg-amber-500/10 border-amber-500/30',
+    regressed: 'text-red-300 bg-red-500/10 border-red-500/30',
+    inconclusive: 'text-forge-muted bg-forge-border/40 border-forge-border',
+    not_started: 'text-indigo-300 bg-indigo-500/10 border-indigo-500/30',
+  }[report.verdict] || 'text-forge-muted bg-forge-border/40 border-forge-border'
+  const regression = report.regression
+  const regressionDelta = regression?.delta_vs_previous_best == null
+    ? null
+    : Math.round(regression.delta_vs_previous_best * 100)
+
+  const exportReport = () => {
+    const text = [
+      `Genesis Benchmark Arena Report`,
+      ``,
+      `Task: ${report.task}`,
+      `Verdict: ${report.verdict}`,
+      `Summary: ${report.summary}`,
+      ``,
+      `Generations run: ${report.generations_run}`,
+      `Best fitness: ${Math.round(report.fitness.first_best * 100)}% -> ${Math.round(report.fitness.last_best * 100)}% (${bestDelta >= 0 ? '+' : ''}${bestDelta} pts)`,
+      `Mean fitness: ${Math.round(report.fitness.first_mean * 100)}% -> ${Math.round(report.fitness.last_mean * 100)}% (${meanDelta >= 0 ? '+' : ''}${meanDelta} pts)`,
+      `Skills distilled: ${report.skills.total_distilled}`,
+      regression ? `Benchmark: ${regression.benchmark_name || regression.benchmark_id}` : null,
+      regression && regression.previous_best_fitness != null
+        ? `Previous best: ${Math.round(regression.previous_best_fitness * 100)}% (${regressionDelta >= 0 ? '+' : ''}${regressionDelta} pts)`
+        : null,
+      report.best_organism ? `Best organism: ${report.best_organism.name} (${Math.round(report.best_organism.fitness * 100)}%)` : `Best organism: none yet`,
+      ``,
+      report.claim,
+    ].filter(Boolean).join('\n')
+    navigator.clipboard?.writeText(text)
+  }
+
+  return (
+    <div className="rounded-xl border border-forge-border p-4 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-widest text-forge-muted">Evidence of Learning</div>
+          <div className="text-sm text-forge-text mt-1">{report.summary}</div>
+        </div>
+        <span className={`text-xs px-2 py-1 rounded-full border ${verdictStyle}`}>
+          {report.verdict.replace('_', ' ')}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-center">
+        <div className="bg-forge-panel rounded-lg p-2">
+          <div className="text-xs text-forge-muted">best delta</div>
+          <div className={`text-lg font-bold ${bestDelta > 0 ? 'text-emerald-400' : bestDelta < 0 ? 'text-red-400' : 'text-forge-text'}`}>
+            {bestDelta >= 0 ? '+' : ''}{bestDelta}
+          </div>
+        </div>
+        <div className="bg-forge-panel rounded-lg p-2">
+          <div className="text-xs text-forge-muted">mean delta</div>
+          <div className={`text-lg font-bold ${meanDelta > 0 ? 'text-emerald-400' : meanDelta < 0 ? 'text-red-400' : 'text-forge-text'}`}>
+            {meanDelta >= 0 ? '+' : ''}{meanDelta}
+          </div>
+        </div>
+        <div className="bg-forge-panel rounded-lg p-2">
+          <div className="text-xs text-forge-muted">skills</div>
+          <div className="text-lg font-bold text-amber-400">{report.skills.total_distilled}</div>
+        </div>
+      </div>
+
+      {report.best_organism && (
+        <div className="text-xs text-forge-muted">
+          Best organism: <span className="text-forge-text">{report.best_organism.name}</span>
+          {' '}at <span className="text-emerald-300">{Math.round(report.best_organism.fitness * 100)}%</span> fitness.
+        </div>
+      )}
+
+      {regression && (
+        <div className="rounded-lg border border-forge-border bg-forge-panel/60 p-3 text-xs">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-forge-muted">benchmark</div>
+              <div className="text-forge-text">{regression.benchmark_name || regression.benchmark_id}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-forge-muted">previous runs</div>
+              <div className="text-forge-text font-mono">{regression.previous_completed_runs}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-forge-muted">vs previous best</div>
+              <div className={`font-mono ${
+                regressionDelta == null
+                  ? 'text-forge-muted'
+                  : regressionDelta >= 0
+                    ? 'text-emerald-300'
+                    : 'text-red-300'
+              }`}>
+                {regressionDelta == null ? 'baseline' : `${regressionDelta >= 0 ? '+' : ''}${regressionDelta} pts`}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <button
+        onClick={exportReport}
+        className="w-full text-xs px-3 py-1.5 rounded-lg bg-forge-border/40 hover:bg-forge-border border border-forge-border text-forge-text"
+      >
+        Copy report
+      </button>
+    </div>
+  )
+}
+
 // ── Start form ───────────────────────────────────────────────────────
 function StartForm({ onStart }) {
+  const [benchmarks, setBenchmarks] = useState([])
+  const [benchmarkId, setBenchmarkId] = useState('repo_triage')
   const [task, setTask] = useState('Analyze the state of an open-source repository and suggest the most impactful contribution.')
   const [nOrganisms, setNOrganisms] = useState(4)
   const [maxGenerations, setMaxGenerations] = useState(3)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let active = true
+    apiRequest('/api/genesis/population/benchmarks')
+      .then(data => {
+        if (!active) return
+        const next = data.benchmarks || []
+        setBenchmarks(next)
+        const selected = next.find(b => b.benchmark?.id === benchmarkId)
+        if (selected?.benchmark?.task) setTask(selected.benchmark.task)
+      })
+      .catch(() => {})
+    return () => { active = false }
+  }, [])
+
+  const handleBenchmarkChange = (id) => {
+    setBenchmarkId(id)
+    const selected = benchmarks.find(b => b.benchmark?.id === id)
+    if (selected?.benchmark?.task) setTask(selected.benchmark.task)
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     setLoading(true)
+    setError(null)
     try {
-      const res = await fetch(API('/api/genesis/population/start'), {
+      const data = await apiRequest('/api/genesis/population/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           task,
-          perception: { type: 'task', description: task },
+          perception: benchmarkId ? {} : { type: 'task', description: task },
+          benchmark_id: benchmarkId || null,
           n_organisms: nOrganisms,
           max_generations: maxGenerations,
         }),
       })
-      const data = await res.json()
       onStart(data.run)
+    } catch (e) {
+      setError(e.message || 'Failed to start evolution')
     } finally {
       setLoading(false)
     }
@@ -201,6 +393,58 @@ function StartForm({ onStart }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      <div>
+        <label className="block text-xs text-forge-muted mb-1">Benchmark arena task</label>
+        <select
+          value={benchmarkId}
+          onChange={e => handleBenchmarkChange(e.target.value)}
+          className="w-full bg-forge-panel border border-forge-border rounded-lg px-3 py-2 text-sm text-forge-text focus:outline-none focus:border-purple-500/60"
+        >
+          <option value="">Custom task</option>
+          {benchmarks.map(item => (
+            <option key={item.benchmark.id} value={item.benchmark.id}>
+              {item.benchmark.name}
+              {item.completed_runs ? ` · ${item.completed_runs} prior` : ''}
+            </option>
+          ))}
+          </select>
+        {benchmarkId && (
+          <div className="mt-2 grid grid-cols-3 gap-2 text-center">
+            {(() => {
+              const selected = benchmarks.find(b => b.benchmark?.id === benchmarkId)
+              return [
+                ['prior runs', selected?.completed_runs ?? 0],
+                ['best', selected?.best_fitness == null ? '—' : `${Math.round(selected.best_fitness * 100)}%`],
+                ['latest', selected?.latest_best_fitness == null ? '—' : `${Math.round(selected.latest_best_fitness * 100)}%`],
+              ].map(([label, value]) => (
+                <div key={label} className="bg-forge-panel/70 border border-forge-border rounded-lg py-2">
+                  <div className="text-[10px] text-forge-muted">{label}</div>
+                  <div className="text-xs font-mono text-forge-text">{value}</div>
+                </div>
+              ))
+            })()}
+          </div>
+        )}
+        {benchmarkId && (() => {
+          const selected = benchmarks.find(b => b.benchmark?.id === benchmarkId)
+          const rubric = selected?.benchmark?.rubric || []
+          return rubric.length ? (
+            <div className="mt-2 rounded-lg border border-forge-border bg-forge-panel/50 p-3">
+              <div className="mb-2 text-[10px] uppercase tracking-widest text-forge-muted">Rubric</div>
+              <div className="space-y-1">
+                {rubric.map(item => (
+                  <div key={item.id} className="text-xs text-forge-text">
+                    {item.label}
+                    <span className="ml-2 text-[10px] text-forge-muted">
+                      {item.signals.slice(0, 3).join(', ')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null
+        })()}
+      </div>
       <div>
         <label className="block text-xs text-forge-muted mb-1">Task (shared goal for all organisms)</label>
         <textarea
@@ -232,8 +476,13 @@ function StartForm({ onStart }) {
         type="submit" disabled={loading || !task.trim()}
         className="w-full py-2 rounded-lg bg-gradient-to-r from-fuchsia-500/20 to-indigo-500/20 hover:from-fuchsia-500/40 hover:to-indigo-500/40 border border-purple-500/40 text-purple-200 text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-all"
       >
-        {loading ? 'Starting…' : '🧬 Start Evolution'}
+        {loading ? 'Starting...' : 'Start benchmark run'}
       </button>
+      {error && (
+        <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded p-2">
+          {error}
+        </div>
+      )}
     </form>
   )
 }
@@ -241,14 +490,18 @@ function StartForm({ onStart }) {
 // ── Run detail view ──────────────────────────────────────────────────
 function RunDetail({ runId, onBack, eventLog }) {
   const [run, setRun] = useState(null)
+  const [report, setReport] = useState(null)
+  const [error, setError] = useState(null)
   const pollRef = useRef(null)
 
   const fetchRun = async () => {
     try {
-      const res = await fetch(API(`/api/genesis/population/${runId}`))
-      const data = await res.json()
-      setRun(data)
-    } catch { /* ignore */ }
+      setRun(await apiRequest(`/api/genesis/population/${runId}`))
+      setReport(await apiRequest(`/api/genesis/population/${runId}/report`))
+      setError(null)
+    } catch (e) {
+      setError(e.message || 'Failed to load run')
+    }
   }
 
   useEffect(() => {
@@ -264,7 +517,11 @@ function RunDetail({ runId, onBack, eventLog }) {
   }, [eventLog])
 
   const handleStop = async () => {
-    await fetch(API(`/api/genesis/population/${runId}/stop`), { method: 'POST' })
+    try {
+      await apiRequest(`/api/genesis/population/${runId}/stop`, { method: 'POST' })
+    } catch (e) {
+      setError(e.message || 'Failed to stop run')
+    }
     fetchRun()
   }
 
@@ -306,10 +563,17 @@ function RunDetail({ runId, onBack, eventLog }) {
       </div>
 
       {/* Summary */}
+      {error && (
+        <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded p-2">
+          {error}
+        </div>
+      )}
+
+      {/* Summary */}
       <div className="rounded-xl border border-forge-border p-4 space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-medium truncate max-w-[240px]" title={run.task}>
-            {run.task}
+            {run.benchmark_name || run.task}
           </h3>
           <span className={`text-xs font-medium ${statusColor}`}>
             {run.is_running && <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse mr-1.5 mb-0.5" />}
@@ -354,6 +618,8 @@ function RunDetail({ runId, onBack, eventLog }) {
         )}
       </div>
 
+      <EvidenceReport report={report} />
+
       {/* Generation blocks */}
       <div className="space-y-2">
         {[...(run.generations || [])].reverse().map((gen, i) => (
@@ -376,13 +642,16 @@ function RunDetail({ runId, onBack, eventLog }) {
 // ── Run list ─────────────────────────────────────────────────────────
 function RunList({ onSelect, onNew }) {
   const [runs, setRuns] = useState([])
+  const [error, setError] = useState(null)
 
   const fetchRuns = async () => {
     try {
-      const res = await fetch(API('/api/genesis/population'))
-      const data = await res.json()
+      const data = await apiRequest('/api/genesis/population')
       setRuns(data.runs || [])
-    } catch { /* ignore */ }
+      setError(null)
+    } catch (e) {
+      setError(e.message || 'Failed to load evolution runs')
+    }
   }
 
   useEffect(() => {
@@ -393,7 +662,11 @@ function RunList({ onSelect, onNew }) {
 
   const handleDelete = async (e, runId) => {
     e.stopPropagation()
-    await fetch(API(`/api/genesis/population/${runId}`), { method: 'DELETE' })
+    try {
+      await apiRequest(`/api/genesis/population/${runId}`, { method: 'DELETE' })
+    } catch (err) {
+      setError(err.message || 'Failed to delete run')
+    }
     fetchRuns()
   }
 
@@ -408,28 +681,42 @@ function RunList({ onSelect, onNew }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-forge-text">Evolution Runs</h3>
+        <div>
+          <h3 className="text-sm font-medium text-forge-text">Benchmark Arena</h3>
+          <p className="text-[10px] text-forge-muted">Repeatable tasks, rubric scores, regression baselines.</p>
+        </div>
         <button
           onClick={onNew}
           className="text-xs px-3 py-1.5 rounded-lg bg-gradient-to-r from-fuchsia-500/20 to-indigo-500/20 hover:from-fuchsia-500/40 hover:to-indigo-500/40 border border-purple-500/40 text-purple-200"
         >
-          + New Run
+          + New Benchmark
         </button>
       </div>
 
+      {error && (
+        <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded p-2">
+          {error}
+        </div>
+      )}
+
       {runs.length === 0 && (
         <div className="text-center text-forge-muted text-sm py-12">
-          <div className="text-3xl mb-3">🧬</div>
-          <div>No evolution runs yet.</div>
-          <div className="text-xs mt-1">Start one to watch organisms evolve.</div>
+          <div className="text-3xl mb-3">Benchmarks</div>
+          <div>No benchmark runs yet.</div>
+          <div className="text-xs mt-1">Start one to measure organism learning.</div>
         </div>
       )}
 
       {runs.map(run => (
-        <button
+        <div
           key={run.id}
           onClick={() => onSelect(run.id)}
-          className="w-full text-left p-3 rounded-xl border border-forge-border hover:border-purple-500/40 hover:bg-white/5 transition-all"
+          role="button"
+          tabIndex={0}
+          onKeyDown={e => {
+            if (e.key === 'Enter' || e.key === ' ') onSelect(run.id)
+          }}
+          className="w-full cursor-pointer text-left p-3 rounded-xl border border-forge-border hover:border-purple-500/40 hover:bg-white/5 transition-all"
         >
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
@@ -450,13 +737,18 @@ function RunList({ onSelect, onNew }) {
             </div>
           </div>
           <p className="text-xs text-forge-muted line-clamp-2">{run.task}</p>
+          {run.benchmark_name && (
+            <div className="mt-1 text-[10px] text-purple-300">
+              benchmark · {run.benchmark_name}
+            </div>
+          )}
           <div className="mt-2">
             <FitnessBar
               value={run.max_generations > 0 ? (run.current_generation / run.max_generations) : 0}
               size="sm"
             />
           </div>
-        </button>
+        </div>
       ))}
     </div>
   )
@@ -487,10 +779,10 @@ export default function PopulationRunner({ eventLog }) {
             ← Back
           </button>
           <div>
-            <h3 className="text-sm font-medium mb-1">New Evolution Run</h3>
+            <h3 className="text-sm font-medium mb-1">New Benchmark Run</h3>
             <p className="text-xs text-forge-muted mb-4">
-              All organisms share the same goal. They are scored by the meta-cognitive critic
-              after each generation. Top performers breed the next generation.
+              All organisms share the same task. They are scored by meta-cognition plus
+              benchmark-specific rubric alignment. Top performers breed the next generation.
             </p>
           </div>
           <StartForm onStart={handleStart} />

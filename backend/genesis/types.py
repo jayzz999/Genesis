@@ -289,3 +289,29 @@ class MetaDecision(BaseModel):
         0.0, description="-1.0 to 1.0: how much this strategy helped vs. baseline."
     )
     confidence: float = Field(0.5, description="Critic confidence in its evaluation.")
+
+
+# ── Long-Term Memory (Module 2) ──────────────────────────────────────────
+
+class LongTermMemory(BaseModel):
+    """A durable memory shared across organisms and benchmark runs.
+
+    Learned patterns live inside one organism. LongTermMemory is the next
+    layer: reusable experience that future organisms can retrieve before
+    reasoning, even if they were born later.
+    """
+    id: str = Field(default_factory=lambda: f"mem_{uuid4().hex[:12]}")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    scope: str = "global"  # global | organism | benchmark | curriculum
+    kind: str = "lesson"   # lesson | pattern | benchmark_result | failure | curriculum
+    text: str
+    tags: list[str] = Field(default_factory=list)
+    organism_id: Optional[str] = None
+    benchmark_id: Optional[str] = None
+    source_decision_id: Optional[str] = None
+    source_meta_decision_id: Optional[str] = None
+    source_run_id: Optional[str] = None
+    score: float = 0.5
+    use_count: int = 0
+    last_used_at: Optional[datetime] = None

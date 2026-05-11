@@ -15,6 +15,8 @@ Each organism's perception_sources is a list of dicts. Supported shapes:
     {"kind": "interval",  "type": "tick",       "interval_s": 30, "payload": {...}}
     {"kind": "http_poll", "type": "rss_check",  "url": "https://...", "interval_s": 120,
      "method": "GET", "headers": {...}}
+    {"kind": "github_repo","type": "repo_maintainer_signal", "repo": "owner/repo",
+     "interval_s": 300}
     {"kind": "webhook",   "type": "github_event","token": "wh_..."}  # token auto-generated
 
 The lifecycle manager runs as a single background asyncio task. It scans
@@ -34,7 +36,8 @@ from typing import Any
 
 import httpx
 
-from . import dreams, events, runtime, store
+from . import connectors, dreams, events, nervous_system, runtime, store
+from .types import OrganismState
 
 logger = logging.getLogger("genesis.lifecycle")
 
@@ -140,7 +143,10 @@ async def _supervisor_loop() -> None:
 
 
 async def _reconcile() -> None:
-    organisms = store.list_organisms()
+    organisms = [
+        o for o in store.list_organisms()
+        if o.state not in (OrganismState.DYING, OrganismState.DEAD)
+    ]
     alive_ids = {o.id for o in organisms}
 
     # Reap heartbeats for organisms that no longer exist
@@ -190,9 +196,26 @@ async def _heartbeat(organism_id: str, startup_jitter: bool = False) -> None:
             if not org:
                 logger.info(f"[Heartbeat] {organism_id} organism gone, stopping")
                 return
+            if org.state in (OrganismState.DYING, OrganismState.DEAD):
+                logger.info(f"[Heartbeat] {organism_id} state={org.state}, stopping")
+                return
 
             now = datetime.utcnow()
             sources = org.perception_sources or []
+
+            try:
+                ns_state = nervous_system.tick(organism_id, {"type": "heartbeat"})
+                await events.emit("organism.nervous_tick", {
+                    "organism_id": organism_id,
+                    "nervous_system": {
+                        "phase": ns_state.get("phase"),
+                        "mood": ns_state.get("mood"),
+                        "needs": ns_state.get("needs", [])[:3],
+                        "intentions": ns_state.get("intentions", [])[:3],
+                    },
+                })
+            except Exception as e:
+                logger.warning(f"[Heartbeat] {organism_id} nervous system tick failed: {e}")
 
             for i, src in enumerate(sources):
                 kind = src.get("kind")
@@ -208,6 +231,10 @@ async def _heartbeat(organism_id: str, startup_jitter: bool = False) -> None:
                         _last_active[organism_id] = now
                     elif kind == "http_poll":
                         await _fire_http_poll(organism_id, src)
+                        last_fired[i] = now
+                        _last_active[organism_id] = now
+                    elif kind == "github_repo":
+                        await _fire_github_repo(organism_id, src)
                         last_fired[i] = now
                         _last_active[organism_id] = now
                     # webhook sources fire externally; nothing to poll here
@@ -244,8 +271,14 @@ async def _heartbeat(organism_id: str, startup_jitter: bool = False) -> None:
                         logger.warning(f"[Heartbeat] {organism_id} dreaming failed: {e}")
 
             # Jitter prevents all organisms from waking at the same moment
-            # when many are alive simultaneously (avoids LLM stampedes).
-            await asyncio.sleep(2 + random.uniform(0, 3))
+            # when many are alive simultaneously. Demo organisms can opt into
+            # a 1s source interval, so keep that path responsive.
+            has_fast_source = any(
+                int(src.get("interval_s", 60)) <= 1
+                for src in sources
+                if src.get("kind") in {"interval", "http_poll", "github_repo"}
+            )
+            await asyncio.sleep(1 if has_fast_source else 2 + random.uniform(0, 3))
 
     except asyncio.CancelledError:
         logger.info(f"[Heartbeat] {organism_id} cancelled")
@@ -261,6 +294,41 @@ async def _fire_interval(organism_id: str, src: dict) -> None:
         "type": src.get("type", "tick"),
         "source": "interval",
         "payload": src.get("payload", {}),
+        "ts": datetime.utcnow().isoformat(),
+    }
+    await runtime.perceive(
+        organism_id, perception, event_callback=events.make_callback(),
+    )
+
+
+async def _fire_github_repo(organism_id: str, src: dict) -> None:
+    repo = str(src.get("repo") or "").strip()
+    probe_adapter = str(src.get("read_probe") or "github_create_issue")
+    if repo:
+        probe = await asyncio.to_thread(
+            connectors.probe_adapter,
+            adapter_id=probe_adapter,
+            scope=repo,
+            live=True,
+        )
+    else:
+        probe = {
+            "status": "fail",
+            "checks": [{"name": "repository", "ok": False, "detail": "repo is not configured"}],
+        }
+
+    perception = {
+        "type": src.get("type", "repo_maintainer_signal"),
+        "source": "github_repo",
+        "repo": repo,
+        "payload": {
+            **(src.get("payload") or {}),
+            "repo": repo,
+            "probe": probe,
+            "write_connectors": src.get("write_connectors", []),
+            "requires_approval": bool(src.get("requires_approval", True)),
+            "no_fake_activity": bool(src.get("no_fake_activity", True)),
+        },
         "ts": datetime.utcnow().isoformat(),
     }
     await runtime.perceive(
